@@ -1,0 +1,160 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Production Render: PostgreSQL. Local: set DATABASE_URL accordingly.
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String
+  name         String?
+  role         String    @default("user")
+  credits      Int       @default(5)
+  plan         String    @default("free")
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  lastSeenAt   DateTime?
+
+  generations  VideoGeneration[]
+  uploads      Upload[]
+  transactions CreditTransaction[]
+  sessions     Session[]
+  auditLogs    AdminAuditLog[]
+
+  @@index([email])
+  @@map("users")
+}
+
+model ApiKey {
+  id             String    @id @default(cuid())
+  encryptedKey   String
+  maskedKey      String
+  provider       String    @default("agnes")
+  status         String    @default("active")
+  usageCount     Int       @default(0)
+  successCount   Int       @default(0)
+  errorCount     Int       @default(0)
+  rateLimitCount Int       @default(0)
+  lastUsedAt     DateTime?
+  disabledUntil  DateTime?
+  createdAt      DateTime  @default(now())
+
+  generations VideoGeneration[]
+
+  @@index([status])
+  @@index([disabledUntil])
+  @@map("api_keys")
+}
+
+model Upload {
+  id           String    @id @default(cuid())
+  userId       String
+  storageKey   String
+  originalName String
+  mimeType     String
+  fileSize     Int
+  width        Int?
+  height       Int?
+  expiresAt    DateTime?
+  createdAt    DateTime  @default(now())
+
+  user        User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  generations VideoGeneration[]
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("uploads")
+}
+
+model VideoGeneration {
+  id              String    @id @default(cuid())
+  userId          String
+  apiKeyId        String?
+  uploadId        String?
+  prompt          String
+  finalPrompt     String?
+  style           String?
+  format          String
+  durationSeconds Int
+  width           Int
+  height          Int
+  numFrames       Int
+  frameRate       Int       @default(24)
+  provider        String    @default("mock")
+  providerJobId   String?
+  status          String    @default("pending")
+  progress        Int       @default(0)
+  videoStorageKey String?
+  videoUrl        String?
+  thumbnailUrl    String?
+  errorCode       String?
+  errorMessage    String?
+  creditsUsed     Int       @default(0)
+  creditStatus    String    @default("none")
+  createdAt       DateTime  @default(now())
+  startedAt       DateTime?
+  completedAt     DateTime?
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  apiKey ApiKey? @relation(fields: [apiKeyId], references: [id], onDelete: SetNull)
+  upload Upload? @relation(fields: [uploadId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+  @@index([providerJobId])
+  @@index([apiKeyId])
+  @@map("video_generations")
+}
+
+model CreditTransaction {
+  id           String   @id @default(cuid())
+  userId       String
+  generationId String?
+  type         String
+  amount       Int
+  balanceAfter Int
+  description  String?
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([generationId])
+  @@index([createdAt])
+  @@map("credit_transactions")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+model AdminAuditLog {
+  id         String   @id @default(cuid())
+  adminId    String
+  action     String
+  targetType String?
+  targetId   String?
+  metadata   String?
+  createdAt  DateTime @default(now())
+
+  admin User @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@index([adminId])
+  @@index([createdAt])
+  @@map("admin_audit_logs")
+}

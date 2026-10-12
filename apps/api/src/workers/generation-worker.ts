@@ -1,0 +1,316 @@
+/**
+ * Generation worker – separate process.
+ * Uses MockVideoProvider / AgnesVideoProvider from packages/video-provider.
+ * Temporary errors are rethrown for BullMQ retry; permanent errors mark failed + refund once.
+ */
+import { config, safeLog } from "../config";
+import { prisma } from "../lib/prisma";
+import * as creditService from "../services/credit-service";
+import * as storage from "../services/storage-service";
+import {
+  setJobHandler,
+  initQueue,
+  closeQueue,
+  getBullConnection,
+  getQueueName,
+} from "../queues/generation-queue";
+import { MockVideoProvider, AgnesVideoProvider, type VideoProvider } from "@ai-video/video-provider";
+
+/** Mark errors that BullMQ should retry */
+export class TemporaryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TemporaryError";
+  }
+}
+
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function getProvider(): VideoProvider {
+  if (config.videoProvider === "agnes") {
+    return new AgnesVideoProvider({
+      model: config.agnes.model,
+      baseUrl: config.agnes.baseUrl,
+      createPath: config.agnes.createPath,
+      resultPath: config.agnes.resultPath,
+      requestTimeoutMs: config.agnes.requestTimeoutMs,
+      resultTimeoutMs: config.agnes.resultTimeoutMs,
+      imageMode: "base64",
+    });
+  }
+  return new MockVideoProvider();
+}
+
+export async function processGeneration(data: { generationId: string }) {
+  const generationId = data.generationId;
+  const gen = await prisma.videoGeneration.findUnique({
+    where: { id: generationId },
+    include: { upload: true },
+  });
+  if (!gen || gen.status === "cancelled") return;
+
+  if (["completed", "failed", "cancelled"].includes(gen.status)) return;
+
+  await prisma.videoGeneration.update({
+    where: { id: generationId },
+    data: { status: "processing", startedAt: new Date(), progress: 5 },
+  });
+
+  try {
+    if (!gen.upload) {
+      throw new Error("Image manquante"); // permanent
+    }
+
+    const provider = getProvider();
+    let apiKey = "mock";
+    let apiKeyId: string | null = null;
+
+    if (config.videoProvider === "agnes") {
+      const keyRow = await prisma.apiKey.findFirst({
+        where: {
+          status: "active",
+          OR: [{ disabledUntil: null }, { disabledUntil: { lt: new Date() } }],
+        },
+        orderBy: { lastUsedAt: "asc" },
+      });
+      if (!keyRow) throw new Error("Aucune clé API Agnes disponible");
+
+      const { decrypt } = await import("../lib/crypto");
+      apiKey = decrypt(keyRow.encryptedKey);
+      apiKeyId = keyRow.id;
+
+      await prisma.apiKey.update({
+        where: { id: keyRow.id },
+        data: { lastUsedAt: new Date(), usageCount: { increment: 1 } },
+      });
+    }
+
+    let imageDataUrl: string;
+    try {
+      imageDataUrl = await storage.readFileAsBase64DataUrlAsync(
+        gen.upload.storageKey,
+        gen.upload.mimeType
+      );
+    } catch {
+      imageDataUrl = storage.readFileAsBase64DataUrl(
+        gen.upload.storageKey,
+        gen.upload.mimeType
+      );
+    }
+
+    let created;
+    try {
+      created = await provider.createVideo(
+        {
+          model: config.agnes.model,
+          prompt: gen.finalPrompt || gen.prompt,
+          image: imageDataUrl,
+          width: gen.width,
+          height: gen.height,
+          numFrames: gen.numFrames,
+          frameRate: gen.frameRate,
+        },
+        apiKey
+      );
+    } catch (err: any) {
+      const msg = err.message || "";
+      if (/429|rate limit|timeout|ECONNRESET|5\d\d|network|abort/i.test(msg)) {
+        if (apiKeyId && /429/.test(msg)) {
+          await prisma.apiKey.update({
+            where: { id: apiKeyId },
+            data: {
+              errorCount: { increment: 1 },
+              rateLimitCount: { increment: 1 },
+              disabledUntil: new Date(Date.now() + 15 * 60 * 1000),
+              status: "cooldown",
+            },
+          });
+        }
+        throw new TemporaryError(msg);
+      }
+      throw err; // permanent
+    }
+
+    const providerJobId = created.providerJobId;
+    await prisma.videoGeneration.update({
+      where: { id: generationId },
+      data: {
+        providerJobId,
+        progress: 15,
+        ...(apiKeyId ? { apiKeyId } : {}),
+      },
+    });
+
+    // Poll
+    for (let i = 0; i < config.agnes.pollMaxAttempts; i++) {
+      await sleep(config.agnes.pollIntervalMs);
+
+      const current = await prisma.videoGeneration.findUnique({ where: { id: generationId } });
+      if (!current || current.status === "cancelled") return;
+
+      let status;
+      try {
+        // For Agnes, reuse same key
+        let pollKey = apiKey;
+        if (config.videoProvider === "agnes" && current.apiKeyId) {
+          const keyRow = await prisma.apiKey.findUnique({ where: { id: current.apiKeyId } });
+          if (keyRow) {
+            const { decrypt } = await import("../lib/crypto");
+            pollKey = decrypt(keyRow.encryptedKey);
+          }
+        }
+        status = await provider.getVideoStatus(providerJobId, pollKey);
+      } catch (err: any) {
+        const msg = err.message || "";
+        if (/429|timeout|5\d\d|network|abort/i.test(msg)) {
+          throw new TemporaryError(msg);
+        }
+        throw err;
+      }
+
+      if (status.status === "completed" && status.videoUrl) {
+        let videoStorageKey: string | null = null;
+        try {
+          const dl = await storage.downloadVideoToStorage(
+            status.videoUrl,
+            config.maxVideoSizeMb * 1024 * 1024
+          );
+          videoStorageKey = dl.storageKey;
+        } catch (dlErr: any) {
+          // Mock demo URL may fail download — keep URL for mock only
+          if (config.videoProvider !== "mock") {
+            throw new Error(`Téléchargement vidéo impossible: ${dlErr.message}`);
+          }
+          safeLog("worker", "mock video not stored locally", { error: dlErr.message });
+        }
+
+        await prisma.videoGeneration.update({
+          where: { id: generationId },
+          data: {
+            status: "completed",
+            progress: 100,
+            videoUrl: status.videoUrl,
+            videoStorageKey,
+            completedAt: new Date(),
+          },
+        });
+        await creditService.chargeCredits(gen.userId, gen.creditsUsed, generationId);
+        safeLog("worker", "completed", { generationId, stored: Boolean(videoStorageKey) });
+        return;
+      }
+
+      if (status.status === "failed") {
+        throw new Error(status.errorMessage || "Génération échouée");
+      }
+
+      await prisma.videoGeneration.update({
+        where: { id: generationId },
+        data: {
+          progress: status.progress ?? Math.min(90, 15 + i),
+          status: "processing",
+        },
+      });
+    }
+
+    throw new TemporaryError("Délai maximal dépassé – retry");
+  } catch (err: any) {
+    if (err instanceof TemporaryError || err.name === "TemporaryError") {
+      // Re-throw so BullMQ retries; do NOT mark failed or refund yet
+      safeLog("worker", "temporary error – will retry", { generationId, error: err.message });
+      throw err;
+    }
+
+    safeLog("worker", "permanent failure", { generationId, error: err.message });
+    await prisma.videoGeneration.update({
+      where: { id: generationId },
+      data: {
+        status: "failed",
+        errorMessage: err.message || "Erreur",
+        completedAt: new Date(),
+      },
+    });
+    try {
+      await creditService.refundCredits(gen.userId, gen.creditsUsed, generationId);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+export function startWorkerInProcess() {
+  setJobHandler(async (data) => {
+    try {
+      await processGeneration(data);
+    } catch (err: any) {
+      // In-memory queue: no BullMQ retries – permanent fail already handled or log
+      if (err instanceof TemporaryError || err.name === "TemporaryError") {
+        safeLog("worker", "temporary error in-process (no Redis retry)", { error: err.message });
+      }
+    }
+  });
+  safeLog("worker", `In-process handler ready (provider=${config.videoProvider})`);
+}
+
+async function main() {
+  await initQueue();
+  const connection = getBullConnection();
+
+  if (!connection || !config.redisUrl) {
+    safeLog("worker", "No Redis – standalone worker needs REDIS_URL");
+    startWorkerInProcess();
+  } else {
+    const { Worker } = await import("bullmq");
+    const worker = new Worker(
+      getQueueName(),
+      async (job) => {
+        await processGeneration(job.data);
+      },
+      {
+        connection,
+        concurrency: config.queue.concurrency,
+      }
+    );
+    worker.on("failed", (job, err) => {
+      safeLog("worker", "job failed after retries", { id: job?.id, error: err.message });
+      // After all BullMQ attempts exhausted, ensure failed + refund
+      if (job?.data?.generationId) {
+        const gid = job.data.generationId;
+        prisma.videoGeneration
+          .findUnique({ where: { id: gid } })
+          .then(async (g) => {
+            if (g && !["completed", "failed", "cancelled"].includes(g.status)) {
+              await prisma.videoGeneration.update({
+                where: { id: gid },
+                data: {
+                  status: "failed",
+                  errorMessage: err.message || "Échec après retries",
+                  completedAt: new Date(),
+                },
+              });
+              await creditService.refundCredits(g.userId, g.creditsUsed, gid);
+            }
+          })
+          .catch(() => {});
+      }
+    });
+    safeLog("worker", `BullMQ worker started concurrency=${config.queue.concurrency}`);
+  }
+
+  const shutdown = async (sig: string) => {
+    safeLog("worker", `${sig} shutting down`);
+    await closeQueue();
+    await prisma.$disconnect();
+    process.exit(0);
+  };
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
+}
+
+if (require.main === module) {
+  main().catch((err) => {
+    console.error("[worker] Fatal:", err.message);
+    process.exit(1);
+  });
+}

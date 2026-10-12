@@ -1,0 +1,45 @@
+{
+  "name": "ai-video-saas",
+  "version": "1.4.0",
+  "private": true,
+  "description": "SaaS g\u00e9n\u00e9ration vid\u00e9os IA \u2013 s\u00e9curis\u00e9, Render-ready",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=apps/web",
+    "dev:api": "npm run dev --workspace=apps/api",
+    "dev:worker": "npm run worker --workspace=apps/api",
+    "build": "npm run build:web && npm run build:api",
+    "build:web": "npm run build --workspace=apps/web",
+    "build:api": "npm run build:provider && npm run build --workspace=apps/api",
+    "start": "npm run start:web",
+    "start:web": "npm run start --workspace=apps/web",
+    "start:api": "npm run start --workspace=apps/api",
+    "start:worker": "npm run start:worker --workspace=apps/api",
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "db:migrate": "prisma migrate deploy",
+    "db:studio": "prisma studio",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "build:provider": "npm run build --workspace=@ai-video/video-provider",
+    "admin:create": "tsx scripts/create-admin.ts"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@prisma/client": "^5.11.0",
+    "prisma": "^5.11.0",
+    "argon2": "^0.40.1",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0"
+  }
+}

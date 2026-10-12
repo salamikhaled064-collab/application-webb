@@ -1,0 +1,42 @@
+{
+  "name": "@ai-video/api",
+  "version": "1.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "worker": "tsx src/workers/generation-worker.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "start:worker": "node dist/workers/generation-worker.js",
+    "worker:prod": "node dist/workers/generation-worker.js",
+    "typecheck": "tsc --noEmit",
+    "test": "echo 'Run unit tests with vitest when installed'"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.11.0",
+    "argon2": "^0.40.1",
+    "bullmq": "^5.4.0",
+    "cookie-parser": "^1.4.6",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.0",
+    "express-rate-limit": "^7.2.0",
+    "helmet": "^7.1.0",
+    "ioredis": "^5.3.2",
+    "multer": "^1.4.5-lts.1",
+    "uuid": "^9.0.1",
+    "zod": "^3.23.0",
+    "@ai-video/video-provider": "*",
+    "@aws-sdk/client-s3": "^3.540.0"
+  },
+  "devDependencies": {
+    "@types/cookie-parser": "^1.4.7",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/multer": "^1.4.11",
+    "@types/node": "^20.11.0",
+    "@types/uuid": "^9.0.8",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0"
+  }
+}
