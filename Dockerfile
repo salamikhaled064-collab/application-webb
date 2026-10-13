@@ -1,5 +1,5 @@
 # =========================
-# Base
+# Image de base
 # =========================
 FROM node:20-alpine AS base
 
@@ -14,14 +14,14 @@ FROM base AS deps
 
 COPY package.json package-lock.json* ./
 
-# Copie des manifests des workspaces
+# Copie des fichiers package des workspaces
 COPY apps/web/package.json ./apps/web/package.json
 COPY packages/video-provider/package.json ./packages/video-provider/package.json
 
 RUN npm install
 
 # =========================
-# Compilation de Next.js
+# Compilation de l'application
 # =========================
 FROM base AS builder
 
@@ -36,7 +36,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 
 # =========================
-# Image de production
+# Image finale de production
 # =========================
 FROM node:20-alpine AS runner
 
@@ -50,22 +50,28 @@ ENV HOSTNAME=0.0.0.0
 RUN addgroup --system --gid 1001 nodejs \
     && adduser --system --uid 1001 nextjs
 
-# Le serveur standalone Next.js
+# Dépendances Node, y compris Next.js
 COPY --from=builder --chown=nextjs:nodejs \
-    /app/apps/web/.next/standalone/ ./
+    /app/node_modules \
+    ./node_modules
 
-# Les fichiers statiques Next.js
+# Package.json racine et fichiers de verrouillage
 COPY --from=builder --chown=nextjs:nodejs \
-    /app/apps/web/.next/static \
-    ./apps/web/.next/static
+    /app/package.json \
+    ./package.json
 
-# Le dossier public
 COPY --from=builder --chown=nextjs:nodejs \
-    /app/apps/web/public \
-    ./apps/web/public
+    /app/package-lock.json* \
+    ./
+
+# Application web complète avec .next et public
+COPY --from=builder --chown=nextjs:nodejs \
+    /app/apps/web \
+    ./apps/web
 
 USER nextjs
 
 EXPOSE 3000
 
-CMD ["node", "server.js"]
+# Utilise le script défini dans le package.json racine
+CMD ["npm", "run", "start:web"]
