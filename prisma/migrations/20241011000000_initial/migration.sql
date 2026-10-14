@@ -150,3 +150,8 @@ EXCEPTION WHEN duplicate_object THEN null; END $$;
 DO $$ BEGIN
  ALTER TABLE "admin_audit_logs" ADD CONSTRAINT "admin_audit_logs_adminId_fkey" FOREIGN KEY ("adminId") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+-- mode column (safe add)
+DO $$ BEGIN
+  ALTER TABLE "video_generations" ADD COLUMN IF NOT EXISTS "mode" TEXT NOT NULL DEFAULT 'IMAGE_TO_VIDEO';
+EXCEPTION WHEN duplicate_column THEN null; END $$;

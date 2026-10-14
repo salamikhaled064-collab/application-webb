@@ -21,15 +21,19 @@ export interface AgnesConfig {
 }
 
 function buildCreatePayload(request: VideoGenerationRequest) {
-  return {
+  const payload: Record<string, unknown> = {
     model: request.model,
     prompt: request.prompt,
-    image: request.image,
     width: request.width,
     height: request.height,
     num_frames: request.numFrames,
     frame_rate: request.frameRate,
   };
+  // Only include image when present – never send "" for PROMPT_ONLY
+  if (request.image && request.image.length > 0) {
+    payload.image = request.image;
+  }
+  return payload;
 }
 
 async function httpJson(

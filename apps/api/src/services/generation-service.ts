@@ -6,19 +6,27 @@ import { enqueueGeneration } from "../queues/generation-queue";
 const ALLOWED_FORMATS = new Set(Object.keys(VIDEO_PRESETS));
 const ALLOWED_STYLES = new Set(["none", "cinematic", "realistic", "artistic", "dynamic", "anime"]);
 const ALLOWED_DURATIONS = new Set([3, 5, 10, 18]);
+const ALLOWED_MODES = new Set(["PROMPT_ONLY", "IMAGE_TO_VIDEO"]);
 
 export interface CreateGenerationInput {
   userId: string;
-  imageId: string;
+  mode?: "PROMPT_ONLY" | "IMAGE_TO_VIDEO";
+  imageId?: string;
   prompt: string;
   format: string;
   style: string;
   durationSeconds: number;
+  cameraMovement?: string;
+  mood?: string;
 }
 
 export async function createGeneration(input: CreateGenerationInput) {
-  const { userId, imageId, prompt, format, style, durationSeconds } = input;
+  const mode = input.mode || (input.imageId ? "IMAGE_TO_VIDEO" : "PROMPT_ONLY");
+  const { userId, prompt, format, style, durationSeconds } = input;
 
+  if (!ALLOWED_MODES.has(mode)) {
+    throw Object.assign(new Error("Mode non supporté"), { status: 400 });
+  }
   if (!prompt || prompt.trim().length < 10) {
     throw Object.assign(new Error("Le prompt doit contenir au moins 10 caractères"), { status: 400 });
   }
@@ -35,22 +43,33 @@ export async function createGeneration(input: CreateGenerationInput) {
     throw Object.assign(new Error("Durée non supportée"), { status: 400 });
   }
 
-  const upload = await prisma.upload.findUnique({ where: { id: imageId } });
-  if (!upload || upload.userId !== userId) {
-    throw Object.assign(new Error("Image introuvable"), { status: 404 });
+  let uploadId: string | null = null;
+  if (mode === "IMAGE_TO_VIDEO") {
+    if (!input.imageId) {
+      throw Object.assign(new Error("Une image est obligatoire pour le mode image → vidéo"), {
+        status: 400,
+      });
+    }
+    const upload = await prisma.upload.findUnique({ where: { id: input.imageId } });
+    if (!upload || upload.userId !== userId) {
+      throw Object.assign(new Error("Image introuvable"), { status: 404 });
+    }
+    uploadId = input.imageId;
   }
 
   const preset = VIDEO_PRESETS[format];
   const duration = VIDEO_DURATIONS[durationSeconds];
   const cost = creditService.getCost(durationSeconds);
 
-  // Create generation first (pending), then reserve credits
+  const finalPrompt = buildFinalPrompt(prompt.trim(), style, input.cameraMovement, input.mood);
+
   const generation = await prisma.videoGeneration.create({
     data: {
       userId,
-      uploadId: imageId,
+      uploadId,
+      mode,
       prompt: prompt.trim(),
-      finalPrompt: buildFinalPrompt(prompt.trim(), style),
+      finalPrompt,
       style,
       format,
       durationSeconds,
@@ -70,7 +89,7 @@ export async function createGeneration(input: CreateGenerationInput) {
   } catch (err) {
     await prisma.videoGeneration.update({
       where: { id: generation.id },
-      data: { status: "failed", errorMessage: "Crédits insuffisants" },
+      data: { status: "failed", errorMessage: "Crédits insuffisants", completedAt: new Date() },
     });
     throw err;
   }
@@ -80,26 +99,37 @@ export async function createGeneration(input: CreateGenerationInput) {
     data: { status: "queued" },
   });
 
-  // Enqueue for processing
   await enqueueGeneration(generation.id);
 
   return {
-    generationId: generation.id,
+    id: generation.id,
     status: "queued" as const,
+    mode,
     creditsReserved: cost,
+    message: "Génération ajoutée à la file",
   };
 }
 
-function buildFinalPrompt(prompt: string, style: string): string {
-  if (!style || style === "none") return prompt;
-  const styleLabels: Record<string, string> = {
-    cinematic: "cinematic style, film look",
-    realistic: "photorealistic",
-    artistic: "artistic painting style",
-    dynamic: "dynamic motion, energetic",
-    anime: "anime style",
-  };
-  return `${prompt}. Style: ${styleLabels[style] || style}`;
+function buildFinalPrompt(
+  prompt: string,
+  style: string,
+  camera?: string,
+  mood?: string
+): string {
+  const parts = [prompt];
+  if (style && style !== "none") {
+    const styleLabels: Record<string, string> = {
+      cinematic: "cinematic style, film look",
+      realistic: "photorealistic",
+      artistic: "artistic painting style",
+      dynamic: "dynamic motion, energetic",
+      anime: "anime style",
+    };
+    parts.push(`Style: ${styleLabels[style] || style}`);
+  }
+  if (camera) parts.push(`Camera: ${camera}`);
+  if (mood) parts.push(`Mood: ${mood}`);
+  return parts.join(". ");
 }
 
 export async function getGeneration(id: string, userId: string) {
@@ -141,10 +171,10 @@ export async function cancelGeneration(id: string, userId: string) {
 }
 
 function sanitizeGeneration(gen: any) {
-  // Never expose raw Agnes URL – frontend must use /api/generations/:id/video
   const hasVideo = gen.status === "completed" && (gen.videoStorageKey || gen.videoUrl);
   return {
     id: gen.id,
+    mode: gen.mode || "IMAGE_TO_VIDEO",
     prompt: gen.prompt,
     style: gen.style,
     format: gen.format,

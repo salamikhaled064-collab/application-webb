@@ -59,7 +59,8 @@ export async function processGeneration(data: { generationId: string }) {
   });
 
   try {
-    if (!gen.upload) {
+    const isPromptOnly = (gen as any).mode === "PROMPT_ONLY" || !gen.upload;
+    if (!isPromptOnly && !gen.upload) {
       throw new Error("Image manquante"); // permanent
     }
 
@@ -68,6 +69,7 @@ export async function processGeneration(data: { generationId: string }) {
     let apiKeyId: string | null = null;
 
     if (config.videoProvider === "agnes") {
+      // Prefer encrypted keys from /admin; fallback to AGNES_API_KEY env
       const keyRow = await prisma.apiKey.findFirst({
         where: {
           status: "active",
@@ -75,29 +77,36 @@ export async function processGeneration(data: { generationId: string }) {
         },
         orderBy: { lastUsedAt: "asc" },
       });
-      if (!keyRow) throw new Error("Aucune clé API Agnes disponible");
-
-      const { decrypt } = await import("../lib/crypto");
-      apiKey = decrypt(keyRow.encryptedKey);
-      apiKeyId = keyRow.id;
-
-      await prisma.apiKey.update({
-        where: { id: keyRow.id },
-        data: { lastUsedAt: new Date(), usageCount: { increment: 1 } },
-      });
+      if (keyRow) {
+        const { decrypt } = await import("../lib/crypto");
+        apiKey = decrypt(keyRow.encryptedKey);
+        apiKeyId = keyRow.id;
+        await prisma.apiKey.update({
+          where: { id: keyRow.id },
+          data: { lastUsedAt: new Date(), usageCount: { increment: 1 } },
+        });
+      } else if (process.env.AGNES_API_KEY) {
+        apiKey = process.env.AGNES_API_KEY;
+      } else {
+        throw new Error(
+          "Le fournisseur Agnes est activé mais aucune clé API valide n'est configurée côté serveur. Ajoutez une clé via /admin ou la variable AGNES_API_KEY."
+        );
+      }
     }
 
-    let imageDataUrl: string;
-    try {
-      imageDataUrl = await storage.readFileAsBase64DataUrlAsync(
-        gen.upload.storageKey,
-        gen.upload.mimeType
-      );
-    } catch {
-      imageDataUrl = storage.readFileAsBase64DataUrl(
-        gen.upload.storageKey,
-        gen.upload.mimeType
-      );
+    let imageDataUrl = "";
+    if (gen.upload) {
+      try {
+        imageDataUrl = await storage.readFileAsBase64DataUrlAsync(
+          gen.upload.storageKey,
+          gen.upload.mimeType
+        );
+      } catch {
+        imageDataUrl = storage.readFileAsBase64DataUrl(
+          gen.upload.storageKey,
+          gen.upload.mimeType
+        );
+      }
     }
 
     let created;
@@ -106,7 +115,7 @@ export async function processGeneration(data: { generationId: string }) {
         {
           model: config.agnes.model,
           prompt: gen.finalPrompt || gen.prompt,
-          image: imageDataUrl,
+          image: imageDataUrl || undefined,
           width: gen.width,
           height: gen.height,
           numFrames: gen.numFrames,

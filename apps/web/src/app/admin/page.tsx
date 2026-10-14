@@ -3,27 +3,11 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
+import { apiFetch, getNetworkErrorMessage } from "../../lib/api";
 
+/** Thin wrapper – apiFetch already handles CSRF + credentials */
 async function api(path: string, opts: RequestInit = {}) {
-  // CSRF
-  const csrfRes = await fetch(`${API}/api/auth/csrf`, { credentials: "include" });
-  const { csrfToken } = await csrfRes.json().catch(() => ({ csrfToken: "" }));
-  const headers: Record<string, string> = {
-    ...(opts.headers as Record<string, string>),
-  };
-  if (opts.method && opts.method !== "GET") {
-    headers["X-CSRF-Token"] = csrfToken;
-    if (!headers["Content-Type"] && opts.body) headers["Content-Type"] = "application/json";
-  }
-  const res = await fetch(`${API}${path}`, {
-    ...opts,
-    credentials: "include",
-    headers,
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-  return data;
+  return apiFetch(path, opts);
 }
 
 export default function AdminPage() {

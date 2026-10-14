@@ -60,6 +60,10 @@ const authLimiter = rateLimit({
 });
 
 // Health exempt from CSRF
+app.get("/health", (_req, res) => {
+  res.json({ status: "ok" });
+});
+
 app.get("/api/health", async (_req, res) => {
   try {
     await prisma.$queryRaw`SELECT 1`;

@@ -3,8 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
+import { apiFetch, getNetworkErrorMessage } from "../../lib/api";
 
 export default function HistoryPage() {
   const router = useRouter();
@@ -15,14 +14,10 @@ export default function HistoryPage() {
   useEffect(() => {
     (async () => {
       try {
-        const res = await fetch(`${API}/api/generations`, { credentials: "include" });
-        if (res.status === 401) {
-          router.push("/login");
-          return;
-        }
-        const data = await res.json();
+        const data = await apiFetch<{ generations: any[] }>("/api/generations");
         setGenerations(data.generations || []);
-      } catch {
+      } catch (e: any) {
+        if (e.status === 401) router.push("/login");
         setGenerations([]);
       } finally {
         setLoading(false);
@@ -30,16 +25,16 @@ export default function HistoryPage() {
     })();
   }, [router]);
 
-  const filtered =
-    filter === "all"
-      ? generations
-      : generations.filter((g) =>
-          filter === "completed"
-            ? g.status === "completed"
-            : filter === "processing"
-            ? ["pending", "queued", "processing"].includes(g.status)
-            : g.status === "failed"
-        );
+    const filtered = generations.filter((g) => {
+    if (filter === "all") return true;
+    if (filter === "completed") return g.status === "completed";
+    if (filter === "processing") return ["pending", "queued", "processing"].includes(g.status);
+    if (filter === "failed") return g.status === "failed";
+    if (filter === "cancelled") return g.status === "cancelled";
+    if (filter === "PROMPT_ONLY") return (g.mode || "IMAGE_TO_VIDEO") === "PROMPT_ONLY";
+    if (filter === "IMAGE_TO_VIDEO") return (g.mode || "IMAGE_TO_VIDEO") === "IMAGE_TO_VIDEO";
+    return true;
+  });
 
   return (
     <div className="min-h-[calc(100vh-3.5rem)] bg-slate-50 dark:bg-slate-950">
@@ -55,10 +50,13 @@ export default function HistoryPage() {
               onChange={(e) => setFilter(e.target.value)}
               className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-800"
             >
-              <option value="all">Tous les statuts</option>
-              <option value="completed">Terminées</option>
+              <option value="all">Toutes</option>
+              <option value="PROMPT_ONLY">Prompt uniquement</option>
+              <option value="IMAGE_TO_VIDEO">Image + prompt</option>
               <option value="processing">En cours</option>
+              <option value="completed">Terminées</option>
               <option value="failed">Échouées</option>
+              <option value="cancelled">Annulées</option>
             </select>
             <Link
               href="/create"

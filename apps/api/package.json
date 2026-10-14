@@ -10,7 +10,7 @@
     "start:worker": "node dist/workers/generation-worker.js",
     "worker:prod": "node dist/workers/generation-worker.js",
     "typecheck": "tsc --noEmit",
-    "test": "echo 'Run unit tests with vitest when installed'"
+    "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
     "@prisma/client": "^5.11.0",
@@ -37,6 +37,7 @@
     "@types/node": "^20.11.0",
     "@types/uuid": "^9.0.8",
     "tsx": "^4.7.0",
-    "typescript": "^5.4.0"
+    "typescript": "^5.4.0",
+    "vitest": "^1.4.0"
   }
 }

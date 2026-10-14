@@ -106,6 +106,14 @@ if (config.storageProvider === "s3") {
   }
 }
 
+
+// Fail-fast: Redis obligatoire en production
+if (config.isProd && !config.redisUrl) {
+  throw new Error(
+    "[security] REDIS_URL est obligatoire en production. Configurez Redis (Render Key Value) et redéployez."
+  );
+}
+
 export function safeLog(scope: string, message: string, meta?: Record<string, unknown>) {
   const cleaned: Record<string, unknown> = {};
   if (meta) {

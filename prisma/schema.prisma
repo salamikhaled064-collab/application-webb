@@ -76,6 +76,7 @@ model VideoGeneration {
   userId          String
   apiKeyId        String?
   uploadId        String?
+  mode            String    @default("IMAGE_TO_VIDEO")
   prompt          String
   finalPrompt     String?
   style           String?

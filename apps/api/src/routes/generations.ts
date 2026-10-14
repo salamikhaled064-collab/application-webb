@@ -7,24 +7,42 @@ import * as storage from "../services/storage-service";
 
 const router = Router();
 
-const createSchema = z.object({
-  imageId: z.string().min(1).max(64),
-  prompt: z.string().min(10).max(1500),
-  format: z.enum(["9:16", "16:9", "1:1", "4:5"]),
-  style: z.enum(["none", "cinematic", "realistic", "artistic", "dynamic", "anime"]),
-  durationSeconds: z.union([z.literal(3), z.literal(5), z.literal(10), z.literal(18)]),
-});
+const createSchema = z
+  .object({
+    mode: z.enum(["PROMPT_ONLY", "IMAGE_TO_VIDEO"]).optional(),
+    imageId: z.string().min(1).max(64).optional(),
+    prompt: z.string().min(10).max(1500),
+    format: z.enum(["9:16", "16:9", "1:1", "4:5"]),
+    style: z.enum(["none", "cinematic", "realistic", "artistic", "dynamic", "anime"]),
+    durationSeconds: z.union([z.literal(3), z.literal(5), z.literal(10), z.literal(18)]),
+    cameraMovement: z.string().max(200).optional(),
+    mood: z.string().max(200).optional(),
+  })
+  .superRefine((data, ctx) => {
+    const mode = data.mode || (data.imageId ? "IMAGE_TO_VIDEO" : "PROMPT_ONLY");
+    if (mode === "IMAGE_TO_VIDEO" && !data.imageId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "imageId requis pour IMAGE_TO_VIDEO",
+        path: ["imageId"],
+      });
+    }
+  });
 
 router.post("/", requireAuth, async (req, res) => {
   try {
     const body = createSchema.parse(req.body);
+    const mode = body.mode || (body.imageId ? "IMAGE_TO_VIDEO" : "PROMPT_ONLY");
     const result = await generationService.createGeneration({
       userId: req.user!.id,
+      mode,
       imageId: body.imageId,
       prompt: body.prompt,
       format: body.format,
       style: body.style,
       durationSeconds: body.durationSeconds,
+      cameraMovement: body.cameraMovement,
+      mood: body.mood,
     });
     res.status(201).json(result);
   } catch (err: any) {
@@ -106,7 +124,6 @@ async function serveVideo(req: any, res: any, asDownload: boolean) {
     }
   }
 
-  // Mock only: external demo URL
   if (process.env.VIDEO_PROVIDER === "mock" && gen.videoUrl && !/agnes/i.test(gen.videoUrl)) {
     return res.redirect(302, gen.videoUrl);
   }

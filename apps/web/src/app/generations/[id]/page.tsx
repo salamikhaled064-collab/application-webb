@@ -2,9 +2,10 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
+import { apiFetch, getApiUrl, getNetworkErrorMessage } from "../../../lib/api";
 import Link from "next/link";
 
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
+const API = getApiUrl();
 
 export default function GenerationDetailPage() {
   const params = useParams();
@@ -16,17 +17,15 @@ export default function GenerationDetailPage() {
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/api/generations/${id}`, { credentials: "include" });
-      if (res.status === 401) {
-        router.push("/login");
-        return;
-      }
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Erreur");
+      const data = await apiFetch(`/api/generations/${id}`);
       setGen(data);
       setError("");
     } catch (e: any) {
-      setError(e.message);
+      if (e.status === 401) {
+        router.push("/login");
+        return;
+      }
+      setError(getNetworkErrorMessage(e));
     } finally {
       setLoading(false);
     }
@@ -44,13 +43,7 @@ export default function GenerationDetailPage() {
   }, [gen?.status, load]);
 
   async function cancel() {
-    const csrfRes = await fetch(`${API}/api/auth/csrf`, { credentials: "include" });
-    const { csrfToken } = await csrfRes.json().catch(() => ({ csrfToken: "" }));
-    await fetch(`${API}/api/generations/${id}/cancel`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "X-CSRF-Token": csrfToken },
-    });
+    await apiFetch(`/api/generations/${id}/cancel`, { method: "POST" });
     load();
   }
 

@@ -40,7 +40,7 @@ services:
       - key: SESSION_SECRET
         generateValue: true
       - key: ENCRYPTION_KEY
-        generateValue: true
+        sync: false
       - key: VIDEO_PROVIDER
         value: mock
       - key: RUN_WORKER_IN_API

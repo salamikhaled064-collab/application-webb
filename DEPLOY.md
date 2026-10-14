@@ -187,3 +187,20 @@ et **ne pas** déployer le worker séparé. Les fichiers restent sur le même di
 - [ ] Mot de passe admin changé si partagé ailleurs
 - [ ] CORS = uniquement `WEB_URL`
 - [ ] Cookies `Secure` + `SameSite=none` en production
+
+
+## Point critique — ENCRYPTION_KEY
+
+`ENCRYPTION_KEY` doit être **exactement la même valeur** sur les services **API** et **worker**.
+
+Render ne partage pas automatiquement cette variable entre services.
+
+```bash
+openssl rand -hex 32
+```
+
+Copiez le résultat dans :
+- ai-video-api → Environment → ENCRYPTION_KEY
+- ai-video-worker → Environment → ENCRYPTION_KEY
+
+Sans cela, le worker ne pourra pas déchiffrer les clés Agnes stockées par l'API.

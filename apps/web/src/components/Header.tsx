@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useState, useEffect } from "react";
 
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
+import { apiFetch, getApiUrl } from "../lib/api";
 
 export default function Header() {
   const pathname = usePathname();
@@ -21,8 +21,7 @@ export default function Header() {
     setDark(isDark);
     document.documentElement.classList.toggle("dark", isDark);
 
-    fetch(`${API}/api/auth/me`, { credentials: "include" })
-      .then((r) => (r.ok ? r.json() : null))
+    apiFetch<{ user: any }>("/api/auth/me")
       .then((d) => setUser(d?.user || null))
       .catch(() => setUser(null));
   }, [pathname]);
@@ -35,13 +34,11 @@ export default function Header() {
   }
 
   async function logout() {
-    const csrfRes = await fetch(`${API}/api/auth/csrf`, { credentials: "include" });
-    const { csrfToken } = await csrfRes.json().catch(() => ({ csrfToken: "" }));
-    await fetch(`${API}/api/auth/logout`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "X-CSRF-Token": csrfToken },
-    });
+    try {
+      await apiFetch("/api/auth/logout", { method: "POST" });
+    } catch {
+      /* ignore */
+    }
     setUser(null);
     router.push("/");
   }

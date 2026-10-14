@@ -1,20 +1,26 @@
 /**
  * Interface générique pour tout fournisseur de génération vidéo IA.
- * Permet de remplacer Agnes par un autre provider sans toucher au reste de l'application.
  */
 
-export type GenerationStatus = "queued" | "processing" | "completed" | "failed" | "cancelled";
+export type GenerationStatus =
+  | "queued"
+  | "processing"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 export interface VideoGenerationRequest {
   model: string;
   prompt: string;
-  image: string; // base64 data URL ou URL publique selon le mode
+  /** Optional – omit entirely for PROMPT_ONLY (never send empty string) */
+  image?: string;
   width: number;
   height: number;
   numFrames: number;
   frameRate: number;
   style?: string;
   durationSeconds?: number;
+  mode?: "PROMPT_ONLY" | "IMAGE_TO_VIDEO";
 }
 
 export interface VideoGenerationResult {
@@ -42,10 +48,7 @@ export interface VideoProvider {
     signal?: AbortSignal
   ): Promise<VideoGenerationResult>;
 
-  downloadVideo?(
-    videoUrl: string,
-    signal?: AbortSignal
-  ): Promise<Buffer>;
+  downloadVideo?(videoUrl: string, signal?: AbortSignal): Promise<Buffer>;
 }
 
 export interface VideoPreset {
