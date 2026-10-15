@@ -3,156 +3,182 @@ import { z } from "zod";
 import { requireAuth, requireAdmin } from "../middleware/auth";
 import { prisma } from "../lib/prisma";
 import { encrypt, maskKey } from "../lib/crypto";
-import { config } from "../config";
+import { ah, HttpError } from "../lib/async-handler";
 
 const router = Router();
 
 router.use(requireAuth, requireAdmin);
 
-router.get("/stats", async (_req, res) => {
-  try {
-    const [users, generations, completed, failed, keys] = await Promise.all([
+async function audit(adminId: string, action: string, targetType: string, targetId: string, metadata?: unknown) {
+  await prisma.adminAuditLog
+    .create({
+      data: { adminId, action, targetType, targetId, metadata: metadata ? JSON.stringify(metadata) : null },
+    })
+    .catch(() => {});
+}
+
+router.get(
+  "/stats",
+  ah(async (_req, res) => {
+    const [users, generations, completed, failed, processing, keys] = await Promise.all([
       prisma.user.count(),
       prisma.videoGeneration.count(),
       prisma.videoGeneration.count({ where: { status: "completed" } }),
       prisma.videoGeneration.count({ where: { status: "failed" } }),
+      prisma.videoGeneration.count({ where: { status: { in: ["pending", "queued", "processing"] } } }),
       prisma.apiKey.count({ where: { status: "active" } }),
     ]);
-    res.json({ users, generations, completed, failed, activeKeys: keys });
-  } catch {
-    res.status(500).json({ error: "Erreur stats" });
-  }
+    res.json({ users, generations, completed, failed, processing, activeKeys: keys });
+  })
+);
+
+router.get(
+  "/users",
+  ah(async (_req, res) => {
+    const users = await prisma.user.findMany({
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        credits: true,
+        plan: true,
+        createdAt: true,
+        lastSeenAt: true,
+      },
+      orderBy: { createdAt: "desc" },
+      take: 200,
+    });
+    res.json({ users });
+  })
+);
+
+const creditsSchema = z.object({
+  amount: z.number().int().min(-10000).max(10000).refine((n) => n !== 0, "Montant nul"),
+  reason: z.string().max(200).optional(),
 });
 
-router.get("/users", async (_req, res) => {
-  const users = await prisma.user.findMany({
-    select: {
-      id: true,
-      email: true,
-      name: true,
-      role: true,
-      credits: true,
-      plan: true,
-      createdAt: true,
-      lastSeenAt: true,
-    },
-    orderBy: { createdAt: "desc" },
-    take: 100,
-  });
-  res.json({ users });
-});
+// Ajouter (ou retirer) des crédits à un utilisateur
+router.post(
+  "/users/:id/credits",
+  ah(async (req, res) => {
+    const body = creditsSchema.parse(req.body);
+    const result = await prisma.$transaction(async (tx) => {
+      const user = await tx.user.findUnique({ where: { id: req.params.id } });
+      if (!user) throw new HttpError(404, "Utilisateur introuvable");
+      if (user.credits + body.amount < 0) throw new HttpError(400, "Le solde ne peut pas être négatif");
+      const updated = await tx.user.update({
+        where: { id: user.id },
+        data: { credits: { increment: body.amount } },
+      });
+      await tx.creditTransaction.create({
+        data: {
+          userId: user.id,
+          type: body.amount > 0 ? "admin_grant" : "admin_debit",
+          amount: body.amount,
+          balanceAfter: updated.credits,
+          description: body.reason || "Ajustement par un administrateur",
+        },
+      });
+      return updated;
+    });
+    await audit(req.user!.id, "user.credits", "User", result.id, { amount: body.amount });
+    res.json({ id: result.id, credits: result.credits });
+  })
+);
 
-router.get("/api-keys", async (_req, res) => {
-  const keys = await prisma.apiKey.findMany({
-    select: {
-      id: true,
-      maskedKey: true,
-      provider: true,
-      status: true,
-      usageCount: true,
-      successCount: true,
-      errorCount: true,
-      rateLimitCount: true,
-      lastUsedAt: true,
-      disabledUntil: true,
-      createdAt: true,
-    },
-    orderBy: { createdAt: "desc" },
-  });
-  res.json({ keys });
-});
+router.get(
+  "/api-keys",
+  ah(async (_req, res) => {
+    const keys = await prisma.apiKey.findMany({
+      select: {
+        id: true,
+        maskedKey: true,
+        provider: true,
+        status: true,
+        usageCount: true,
+        successCount: true,
+        errorCount: true,
+        rateLimitCount: true,
+        lastUsedAt: true,
+        disabledUntil: true,
+        createdAt: true,
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    res.json({ keys });
+  })
+);
 
 const addKeySchema = z.object({
-  key: z.string().min(8).max(512),
+  key: z.string().trim().min(8, "Clé trop courte").max(512),
   provider: z.string().default("agnes"),
 });
 
-router.post("/api-keys", async (req, res) => {
-  try {
+router.post(
+  "/api-keys",
+  ah(async (req, res) => {
     const body = addKeySchema.parse(req.body);
-    const encryptedKey = encrypt(body.key);
-    const masked = maskKey(body.key);
     const row = await prisma.apiKey.create({
       data: {
-        encryptedKey,
-        maskedKey: masked,
+        encryptedKey: encrypt(body.key),
+        maskedKey: maskKey(body.key),
         provider: body.provider,
         status: "active",
       },
     });
-    await prisma.adminAuditLog.create({
-      data: {
-        adminId: req.user!.id,
-        action: "api_key.create",
-        targetType: "ApiKey",
-        targetId: row.id,
+    await audit(req.user!.id, "api_key.create", "ApiKey", row.id);
+    res.status(201).json({ id: row.id, maskedKey: row.maskedKey, status: row.status });
+  })
+);
+
+router.patch(
+  "/api-keys/:id",
+  ah(async (req, res) => {
+    const status = z.enum(["active", "disabled"]).parse(req.body?.status);
+    const row = await prisma.apiKey.update({
+      where: { id: req.params.id },
+      data: { status, ...(status === "active" ? { disabledUntil: null } : {}) },
+    });
+    await audit(req.user!.id, `api_key.${status}`, "ApiKey", row.id);
+    res.json({ id: row.id, status: row.status, maskedKey: row.maskedKey });
+  })
+);
+
+router.delete(
+  "/api-keys/:id",
+  ah(async (req, res) => {
+    await prisma.apiKey.delete({ where: { id: req.params.id } });
+    await audit(req.user!.id, "api_key.delete", "ApiKey", req.params.id);
+    res.json({ ok: true });
+  })
+);
+
+router.get(
+  "/generations",
+  ah(async (_req, res) => {
+    const gens = await prisma.videoGeneration.findMany({
+      orderBy: { createdAt: "desc" },
+      take: 100,
+      select: {
+        id: true,
+        userId: true,
+        mode: true,
+        prompt: true,
+        status: true,
+        progress: true,
+        format: true,
+        durationSeconds: true,
+        creditsUsed: true,
+        creditStatus: true,
+        errorMessage: true,
+        createdAt: true,
+        completedAt: true,
+        user: { select: { email: true } },
       },
     });
-    res.status(201).json({
-      id: row.id,
-      maskedKey: row.maskedKey,
-      status: row.status,
-    });
-  } catch (err: any) {
-    if (err.name === "ZodError") {
-      return res.status(400).json({ error: "Clé invalide" });
-    }
-    res.status(500).json({ error: "Impossible d'ajouter la clé" });
-  }
-});
-
-router.patch("/api-keys/:id", async (req, res) => {
-  const status = z.enum(["active", "disabled"]).parse(req.body.status);
-  const row = await prisma.apiKey.update({
-    where: { id: req.params.id },
-    data: { status },
-  });
-  await prisma.adminAuditLog.create({
-    data: {
-      adminId: req.user!.id,
-      action: `api_key.${status}`,
-      targetType: "ApiKey",
-      targetId: row.id,
-    },
-  });
-  res.json({ id: row.id, status: row.status, maskedKey: row.maskedKey });
-});
-
-router.delete("/api-keys/:id", async (req, res) => {
-  await prisma.apiKey.delete({ where: { id: req.params.id } });
-  await prisma.adminAuditLog.create({
-    data: {
-      adminId: req.user!.id,
-      action: "api_key.delete",
-      targetType: "ApiKey",
-      targetId: req.params.id,
-    },
-  });
-  res.json({ ok: true });
-});
-
-router.get("/generations", async (_req, res) => {
-  const gens = await prisma.videoGeneration.findMany({
-    orderBy: { createdAt: "desc" },
-    take: 50,
-    select: {
-      id: true,
-      userId: true,
-      status: true,
-      progress: true,
-      format: true,
-      durationSeconds: true,
-      creditsUsed: true,
-      creditStatus: true,
-      errorMessage: true,
-      createdAt: true,
-      completedAt: true,
-    },
-  });
-  res.json({ generations: gens });
-});
-
-// silence unused config import warning in some TS setups
-void config;
+    res.json({ generations: gens });
+  })
+);
 
 export default router;

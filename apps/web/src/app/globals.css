@@ -2,33 +2,131 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Palette claire (par défaut) — valeurs RGB séparées par des espaces pour l'opacité Tailwind */
 :root {
-  --background: #f8fafc;
-  --foreground: #0f172a;
-  --card: #ffffff;
-  --border: #e2e8f0;
-  --muted: #64748b;
-  --brand: #0284c7;
-  --brand-hover: #0369a1;
+  --paper: 243 245 250;
+  --surface: 255 255 255;
+  --sunken: 234 237 246;
+  --ink: 20 23 43;
+  --muted: 91 96 120;
+  --line: 222 226 238;
+  --brand: 47 75 255;
+  --brand-soft: 229 233 255;
+  --on-brand: 255 255 255;
+  --accent: 255 201 51;
+  --ok: 10 108 68;
+  --ok-soft: 220 245 233;
+  --bad: 200 40 66;
+  --bad-soft: 253 227 232;
+  --warn: 150 92 0;
+  --warn-soft: 255 240 205;
+  --shadow: 20 23 43;
+  color-scheme: light;
 }
 
+/* Mode sombre : bleu nuit lisible, jamais noir pur */
 .dark {
-  --background: #020617;
-  --foreground: #f1f5f9;
-  --card: #0f172a;
-  --border: #1e293b;
-  --muted: #94a3b8;
-  --brand: #0ea5e9;
-  --brand-hover: #38bdf8;
+  --paper: 19 24 45;
+  --surface: 28 34 61;
+  --sunken: 14 18 36;
+  --ink: 238 240 250;
+  --muted: 163 170 199;
+  --line: 52 60 96;
+  --brand: 128 146 255;
+  --brand-soft: 30 38 82;
+  --on-brand: 14 18 36;
+  --accent: 255 201 51;
+  --ok: 90 214 164;
+  --ok-soft: 20 62 52;
+  --bad: 255 128 148;
+  --bad-soft: 74 28 42;
+  --warn: 255 205 100;
+  --warn-soft: 66 50 14;
+  --shadow: 0 0 0;
+  color-scheme: dark;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
 }
 
 body {
-  color: var(--foreground);
-  background: var(--background);
-  font-feature-settings: "rlig" 1, "calt" 1;
+  background: rgb(var(--paper));
+  color: rgb(var(--ink));
+  font-family: "Instrument Sans Variable", ui-sans-serif, system-ui, sans-serif;
+  font-feature-settings: "calt" 1;
 }
 
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 3px; }
-.dark ::-webkit-scrollbar-thumb { background: #475569; }
+h1,
+h2,
+h3 {
+  font-family: "Bricolage Grotesque Variable", ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: -0.02em;
+}
+
+::selection {
+  background: rgb(var(--accent) / 0.55);
+}
+
+:focus-visible {
+  outline: 2px solid rgb(var(--brand));
+  outline-offset: 2px;
+}
+
+@layer components {
+  .card {
+    @apply rounded-2xl border border-line bg-surface shadow-lift;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply btn bg-brand text-on-brand hover:brightness-110;
+  }
+  .btn-secondary {
+    @apply btn border border-line bg-surface text-ink hover:bg-sunken;
+  }
+  .btn-ghost {
+    @apply btn text-muted hover:bg-sunken hover:text-ink;
+  }
+  .btn-danger {
+    @apply btn bg-bad-soft text-bad hover:brightness-95;
+  }
+
+  .input {
+    @apply w-full rounded-xl border border-line bg-surface px-3.5 py-2.5 text-sm text-ink placeholder:text-muted/70 focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/25;
+  }
+  .label {
+    @apply mb-1.5 block text-sm font-medium text-ink;
+  }
+  .hint {
+    @apply mt-1.5 text-xs text-muted;
+  }
+
+  .chip {
+    @apply inline-flex items-center rounded-lg border border-line bg-surface px-3 py-1.5 text-sm font-medium text-muted transition-colors hover:text-ink;
+  }
+  .chip[aria-pressed="true"] {
+    @apply border-brand bg-brand-soft text-brand;
+  }
+}
+
+/* Repères de cadrage (viseur) */
+.vf-corner {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border-color: rgb(var(--accent));
+  border-style: solid;
+  border-width: 0;
+}
+.vf-tl { top: 10px; left: 10px; border-top-width: 3px; border-left-width: 3px; border-top-left-radius: 4px; }
+.vf-tr { top: 10px; right: 10px; border-top-width: 3px; border-right-width: 3px; border-top-right-radius: 4px; }
+.vf-bl { bottom: 10px; left: 10px; border-bottom-width: 3px; border-left-width: 3px; border-bottom-left-radius: 4px; }
+.vf-br { bottom: 10px; right: 10px; border-bottom-width: 3px; border-right-width: 3px; border-bottom-right-radius: 4px; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .rec-dot { animation: rec 1.4s ease-in-out infinite; }
+  @keyframes rec { 50% { opacity: 0.25; } }
+}

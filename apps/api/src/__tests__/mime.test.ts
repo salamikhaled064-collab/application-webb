@@ -1,3 +1,4 @@
+import { describe, it, expect } from "vitest";
 import { detectImageMime, isAllowedImageMime } from "../lib/mime";
 
 describe("mime detection", () => {

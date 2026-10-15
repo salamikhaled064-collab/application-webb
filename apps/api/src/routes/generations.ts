@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
+import { ah } from "../lib/async-handler";
 import { requireAuth } from "../middleware/auth";
 import * as generationService from "../services/generation-service";
 import { prisma } from "../lib/prisma";
@@ -94,7 +95,7 @@ router.delete("/:id", requireAuth, async (req, res) => {
   }
 });
 
-async function serveVideo(req: any, res: any, asDownload: boolean) {
+const serveVideo = ah(async (req, res) => {
   const gen = await prisma.videoGeneration.findUnique({ where: { id: req.params.id } });
   if (!gen || gen.userId !== req.user!.id) {
     return res.status(404).json({ error: "Génération introuvable" });
@@ -103,35 +104,44 @@ async function serveVideo(req: any, res: any, asDownload: boolean) {
     return res.status(400).json({ error: "Vidéo non disponible" });
   }
 
-  res.setHeader("Content-Type", "video/mp4");
-  res.setHeader("X-Content-Type-Options", "nosniff");
-  res.setHeader(
-    "Content-Disposition",
-    `${asDownload ? "attachment" : "inline"}; filename="video-${gen.id}.mp4"`
-  );
+  const asDownload = req.path.endsWith("/download");
+  const headers = {
+    "Content-Type": "video/mp4",
+    "X-Content-Type-Options": "nosniff",
+    "Content-Disposition": `${asDownload ? "attachment" : "inline"}; filename="video-${gen.id}.mp4"`,
+  };
 
   if (gen.videoStorageKey) {
     try {
       if (process.env.STORAGE_PROVIDER === "s3") {
         const buf = await storage.getObjectBuffer(gen.videoStorageKey);
+        res.set(headers);
         res.setHeader("Content-Length", buf.length);
         return res.end(buf);
       }
-      const stream = storage.createReadStream(gen.videoStorageKey);
-      if (stream) return stream.pipe(res);
+      // sendFile gère les requêtes Range (lecture / avance rapide dans le lecteur vidéo)
+      const abs = storage.getAbsolutePath(gen.videoStorageKey);
+      if (storage.fileExists(gen.videoStorageKey)) {
+        return res.sendFile(abs, { headers }, (err) => {
+          if (err && !res.headersSent) res.status(404).json({ error: "Fichier vidéo introuvable" });
+        });
+      }
     } catch {
-      return res.status(404).json({ error: "Fichier vidéo introuvable" });
+      /* on retombe sur les cas ci-dessous */
     }
   }
 
-  if (process.env.VIDEO_PROVIDER === "mock" && gen.videoUrl && !/agnes/i.test(gen.videoUrl)) {
+  // Fournisseur mock : vidéo de démonstration servie par redirection
+  if (gen.provider === "mock" && gen.videoUrl) {
     return res.redirect(302, gen.videoUrl);
   }
 
-  return res.status(404).json({ error: "Fichier vidéo introuvable" });
-}
+  return res.status(404).json({
+    error: "Fichier vidéo introuvable (il a peut-être expiré après un redémarrage du serveur).",
+  });
+});
 
-router.get("/:id/video", requireAuth, (req, res) => serveVideo(req, res, false));
-router.get("/:id/download", requireAuth, (req, res) => serveVideo(req, res, true));
+router.get("/:id/video", requireAuth, serveVideo);
+router.get("/:id/download", requireAuth, serveVideo);
 
 export default router;

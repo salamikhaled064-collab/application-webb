@@ -1,90 +1,137 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { apiFetch, getApiUrl, getNetworkErrorMessage } from "../../lib/api";
+import { apiFetch, getNetworkErrorMessage, notifyAuthChanged } from "../../lib/api";
+import { Alert, IconCheck, IconImage, IconText, IconUpload, ViewFinder } from "../../components/ui";
+
+type Mode = "PROMPT_ONLY" | "IMAGE_TO_VIDEO";
 
 const STYLES = [
   { id: "none", label: "Aucun" },
-  { id: "cinematic", label: "Cinématique" },
+  { id: "cinematic", label: "Cinéma" },
   { id: "realistic", label: "Réaliste" },
   { id: "artistic", label: "Artistique" },
   { id: "dynamic", label: "Dynamique" },
   { id: "anime", label: "Anime" },
 ];
-const FORMATS = ["9:16", "16:9", "1:1", "4:5"] as const;
+const FORMATS = [
+  { id: "9:16", label: "Vertical", hint: "TikTok, Reels, Shorts" },
+  { id: "16:9", label: "Horizontal", hint: "YouTube, TV" },
+  { id: "1:1", label: "Carré", hint: "Feed Instagram" },
+  { id: "4:5", label: "Portrait", hint: "Feed Instagram, Facebook" },
+] as const;
 const DURATIONS = [3, 5, 10, 18] as const;
-const CAMERAS = [
-  "Léger zoom avant",
-  "Panoramique lent",
-  "Caméra fixe",
-  "Mouvement dynamique",
-  "Orbital",
-];
 const COSTS: Record<number, number> = { 3: 1, 5: 2, 10: 4, 18: 7 };
+const CAMERAS = ["Léger zoom avant", "Panoramique lent", "Caméra fixe", "Mouvement dynamique", "Orbital"];
 
-const PROMPT_EXAMPLE =
-  "Une femme présente un nouveau produit dans un studio lumineux, caméra dynamique, style publicitaire premium, éclairage naturel.";
-const ANIMATE_EXAMPLE =
-  "Anime cette image avec un léger mouvement de caméra vers l'avant, fais bouger doucement les éléments et ajoute une lumière cinématique.";
+const EXAMPLES: Record<Mode, string> = {
+  PROMPT_ONLY:
+    "Une jeune entrepreneure présente un nouveau produit dans un studio lumineux, caméra dynamique, style publicitaire, lumière naturelle.",
+  IMAGE_TO_VIDEO:
+    "Anime cette image : léger mouvement de caméra vers l'avant, les cheveux et les vêtements bougent doucement, lumière cinématique.",
+};
 
-type Mode = "PROMPT_ONLY" | "IMAGE_TO_VIDEO";
+const STEPS = ["Mode", "Description", "Réglages", "Récapitulatif"];
 
 export default function CreatePage() {
   const router = useRouter();
+  const fileInput = useRef<HTMLInputElement>(null);
+
+  const [step, setStep] = useState(0);
   const [mode, setMode] = useState<Mode>("PROMPT_ONLY");
   const [prompt, setPrompt] = useState("");
-  const [format, setFormat] = useState<(typeof FORMATS)[number]>("9:16");
+  const [format, setFormat] = useState<string>("9:16");
   const [style, setStyle] = useState("realistic");
   const [duration, setDuration] = useState<number>(5);
   const [camera, setCamera] = useState(CAMERAS[0]);
+
   const [imageId, setImageId] = useState<string | null>(null);
+  const [imageName, setImageName] = useState("");
   const [preview, setPreview] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [dragging, setDragging] = useState(false);
+
+  const [credits, setCredits] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    apiFetch<{ user: { credits: number } }>("/api/auth/me")
+      .then((d) => setCredits(d.user.credits))
+      .catch((e: any) => {
+        if (e?.status === 401) router.push("/login");
+      });
+  }, [router]);
 
   const onFile = useCallback(async (file: File | null) => {
     if (!file) return;
     setError("");
     if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
-      setError("Formats autorisés : JPEG, PNG, WebP.");
+      setError("Format non pris en charge. Utilisez une image JPEG, PNG ou WebP.");
       return;
     }
     if (file.size > 10 * 1024 * 1024) {
-      setError("L'image est trop volumineuse (max 10 Mo).");
+      setError("Cette image dépasse 10 Mo. Choisissez une image plus légère.");
       return;
     }
     setPreview(URL.createObjectURL(file));
+    setImageName(file.name);
+    setImageId(null);
     setUploading(true);
     try {
       const form = new FormData();
       form.append("image", file);
-      const data = await apiFetch<{ imageId: string }>("/api/uploads/image", {
-        method: "POST",
-        body: form,
-        headers: {}, // FormData – no Content-Type
-      });
+      const data = await apiFetch<{ imageId: string }>("/api/uploads/image", { method: "POST", body: form });
       setImageId(data.imageId);
-    } catch (e) {
+    } catch (e: any) {
+      if (e?.status === 401) return router.push("/login");
       setError(getNetworkErrorMessage(e));
       setPreview(null);
-      setImageId(null);
+      setImageName("");
     } finally {
       setUploading(false);
     }
-  }, []);
+  }, [router]);
 
-  async function handleGenerate() {
+  function removeImage() {
+    setPreview(null);
+    setImageId(null);
+    setImageName("");
+    if (fileInput.current) fileInput.current.value = "";
+  }
+
+  function validate(s: number): string {
+    if (s === 0 && mode === "IMAGE_TO_VIDEO") {
+      if (uploading) return "Patientez, l'image est en cours d'envoi.";
+      if (!imageId) return "Ajoutez une image pour animer.";
+    }
+    if (s === 1 && prompt.trim().length < 10) return "Décrivez la scène en au moins 10 caractères.";
+    return "";
+  }
+
+  function next() {
+    const msg = validate(step);
+    if (msg) return setError(msg);
     setError("");
-    if (prompt.trim().length < 10) {
-      setError("Le prompt doit contenir au moins 10 caractères.");
-      return;
+    setStep((s) => Math.min(3, s + 1));
+  }
+
+  async function generate() {
+    for (const s of [0, 1]) {
+      const msg = validate(s);
+      if (msg) {
+        setStep(s);
+        return setError(msg);
+      }
     }
-    if (mode === "IMAGE_TO_VIDEO" && !imageId) {
-      setError("Importez une image pour ce mode.");
-      return;
+    const cost = COSTS[duration];
+    if (credits !== null && credits < cost) {
+      return setError(`Il vous manque ${cost - credits} crédit(s) pour cette vidéo. Choisissez une durée plus courte.`);
     }
+
+    setError("");
     setSubmitting(true);
     try {
       const body: Record<string, unknown> = {
@@ -96,233 +143,264 @@ export default function CreatePage() {
         cameraMovement: camera,
       };
       if (mode === "IMAGE_TO_VIDEO") body.imageId = imageId;
-
-      const data = await apiFetch<{ id: string }>("/api/generations", {
-        method: "POST",
-        body: JSON.stringify(body),
-      });
-      if (data.id) {
-        router.push(`/generations/${data.id}`);
-        return;
-      }
-      setError("Réponse invalide du serveur");
+      const data = await apiFetch<{ id: string }>("/api/generations", { method: "POST", body: JSON.stringify(body) });
+      notifyAuthChanged();
+      router.push(`/generations/${data.id}`);
     } catch (e: any) {
-      if (e.status === 401) {
-        router.push("/login");
-        return;
-      }
+      if (e?.status === 401) return router.push("/login");
       setError(getNetworkErrorMessage(e));
-    } finally {
       setSubmitting(false);
     }
   }
 
+  const cost = COSTS[duration];
+  const notEnough = credits !== null && credits < cost;
+
   return (
-    <div className="min-h-[calc(100vh-3.5rem)] bg-[#f8f7f4] dark:bg-slate-950">
-      <div className="mx-auto max-w-3xl px-4 py-10">
-        <h1 className="text-center text-3xl font-bold tracking-tight text-slate-900 dark:text-white">
-          Créer une vidéo IA
-        </h1>
-        <p className="mt-2 text-center text-sm text-slate-500">
-          Choisissez un mode, décrivez la scène, lancez la génération
-        </p>
+    <div className="mx-auto max-w-3xl px-4 py-8 sm:py-12">
+      <h1 className="text-3xl font-bold sm:text-4xl">Créer une vidéo</h1>
 
-        {/* Mode tabs */}
-        <div className="mt-8 grid grid-cols-2 gap-3">
-          <button
-            type="button"
-            onClick={() => setMode("PROMPT_ONLY")}
-            className={`rounded-2xl border-2 p-4 text-left transition ${
-              mode === "PROMPT_ONLY"
-                ? "border-violet-500 bg-violet-50 shadow-md dark:bg-violet-950/40"
-                : "border-slate-200 bg-white hover:border-slate-300 dark:border-slate-700 dark:bg-slate-900"
-            }`}
-          >
-            <p className="text-lg">✨</p>
-            <p className="mt-1 font-semibold text-slate-900 dark:text-white">Générer avec un prompt</p>
-            <p className="mt-1 text-xs text-slate-500">Texte seul → vidéo (sans image)</p>
-          </button>
-          <button
-            type="button"
-            onClick={() => setMode("IMAGE_TO_VIDEO")}
-            className={`rounded-2xl border-2 p-4 text-left transition ${
-              mode === "IMAGE_TO_VIDEO"
-                ? "border-sky-500 bg-sky-50 shadow-md dark:bg-sky-950/40"
-                : "border-slate-200 bg-white hover:border-slate-300 dark:border-slate-700 dark:bg-slate-900"
-            }`}
-          >
-            <p className="text-lg">🖼️</p>
-            <p className="mt-1 font-semibold text-slate-900 dark:text-white">Animer une image</p>
-            <p className="mt-1 text-xs text-slate-500">Image + prompt → vidéo animée</p>
-          </button>
-        </div>
-
-        <div className="mt-8 space-y-6 rounded-3xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-700 dark:bg-slate-900">
-          {mode === "IMAGE_TO_VIDEO" && (
-            <div>
-              <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Image source</label>
-              <div
-                className="mt-2 flex min-h-[140px] cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-300 bg-slate-50 p-4 dark:border-slate-600 dark:bg-slate-800"
-                onDragOver={(e) => e.preventDefault()}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  onFile(e.dataTransfer.files[0] || null);
-                }}
-                onClick={() => document.getElementById("img-input")?.click()}
-              >
-                {preview ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={preview} alt="Aperçu" className="max-h-40 rounded-lg object-contain" />
-                ) : (
-                  <p className="text-sm text-slate-500">
-                    {uploading ? "Upload…" : "Glissez une image ou cliquez (JPEG, PNG, WebP · max 10 Mo)"}
-                  </p>
-                )}
-                <input
-                  id="img-input"
-                  type="file"
-                  accept="image/jpeg,image/png,image/webp"
-                  className="hidden"
-                  onChange={(e) => onFile(e.target.files?.[0] || null)}
-                />
+      {/* Étapes */}
+      <ol className="mt-6 grid grid-cols-4 gap-2" aria-label="Étapes">
+        {STEPS.map((label, i) => {
+          const done = i < step;
+          const current = i === step;
+          return (
+            <li key={label} aria-current={current ? "step" : undefined}>
+              <div className={`h-1.5 rounded-full ${done || current ? "bg-brand" : "bg-line"}`} />
+              <div className={`mt-2 flex items-center gap-1.5 text-xs font-semibold sm:text-sm ${current ? "text-ink" : "text-muted"}`}>
+                <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] ${done ? "bg-brand text-on-brand" : current ? "bg-brand-soft text-brand" : "bg-sunken text-muted"}`}>
+                  {done ? <IconCheck className="h-3 w-3" /> : i + 1}
+                </span>
+                <span className="truncate">{label}</span>
               </div>
-              {preview && (
-                <button
-                  type="button"
-                  className="mt-2 text-xs text-red-600 hover:underline"
-                  onClick={() => {
-                    setPreview(null);
-                    setImageId(null);
-                  }}
-                >
-                  Supprimer l&apos;image
-                </button>
-              )}
-            </div>
-          )}
+            </li>
+          );
+        })}
+      </ol>
 
+      <section className="card mt-6 p-5 sm:p-7">
+        {/* ÉTAPE 1 : mode */}
+        {step === 0 && (
           <div>
-            <div className="flex items-center justify-between">
-              <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Prompt</label>
-              <span className="text-xs text-slate-400">{prompt.length}/1500</span>
+            <h2 className="text-xl font-bold">Comment voulez-vous commencer ?</h2>
+            <div className="mt-5 grid gap-3 sm:grid-cols-2">
+              {([
+                { id: "PROMPT_ONLY", title: "À partir d'un texte", desc: "Décrivez la scène, l'IA crée la vidéo.", Icon: IconText },
+                { id: "IMAGE_TO_VIDEO", title: "À partir d'une image", desc: "Importez une image et donnez-lui vie.", Icon: IconImage },
+              ] as const).map(({ id, title, desc, Icon }) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => { setMode(id); setError(""); }}
+                  aria-pressed={mode === id}
+                  className={`rounded-2xl border-2 p-4 text-left transition-colors ${mode === id ? "border-brand bg-brand-soft" : "border-line hover:border-muted/50"}`}
+                >
+                  <Icon className={`h-6 w-6 ${mode === id ? "text-brand" : "text-muted"}`} />
+                  <p className="mt-3 font-semibold">{title}</p>
+                  <p className="mt-1 text-sm text-muted">{desc}</p>
+                </button>
+              ))}
             </div>
-            <textarea
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value.slice(0, 1500))}
-              rows={4}
-              placeholder={mode === "PROMPT_ONLY" ? PROMPT_EXAMPLE : ANIMATE_EXAMPLE}
-              className="mt-2 w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm outline-none focus:border-violet-500 focus:ring-2 focus:ring-violet-500/20 dark:border-slate-600 dark:bg-slate-800"
-            />
-            <button
-              type="button"
-              className="mt-1 text-xs text-violet-600 hover:underline"
-              onClick={() => setPrompt(mode === "PROMPT_ONLY" ? PROMPT_EXAMPLE : ANIMATE_EXAMPLE)}
-            >
-              Utiliser l&apos;exemple
-            </button>
-          </div>
 
-          <div className="grid gap-4 sm:grid-cols-2">
+            {mode === "IMAGE_TO_VIDEO" && (
+              <div className="mt-6">
+                <label className="label">Image de départ</label>
+                {preview ? (
+                  <div className="flex items-center gap-4 rounded-2xl border border-line bg-paper p-3">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={preview} alt="Aperçu de l'image" className="h-24 w-24 rounded-xl object-cover" />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-semibold">{imageName}</p>
+                      <p className={`mt-0.5 text-xs ${uploading ? "text-muted" : "text-ok"}`}>
+                        {uploading ? "Envoi en cours…" : "Image prête"}
+                      </p>
+                      <button type="button" onClick={removeImage} className="mt-2 text-xs font-semibold text-bad hover:underline">
+                        Retirer l&apos;image
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => fileInput.current?.click()}
+                    onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+                    onDragLeave={() => setDragging(false)}
+                    onDrop={(e) => { e.preventDefault(); setDragging(false); onFile(e.dataTransfer.files[0] || null); }}
+                    className={`flex w-full flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed px-4 py-10 text-center transition-colors ${dragging ? "border-brand bg-brand-soft" : "border-line bg-paper hover:border-muted/60"}`}
+                  >
+                    <IconUpload className="h-7 w-7 text-brand" />
+                    <span className="text-sm font-semibold">Glissez une image ici ou cliquez pour en choisir une</span>
+                    <span className="text-xs text-muted">JPEG, PNG ou WebP · 10 Mo maximum</span>
+                  </button>
+                )}
+                <input ref={fileInput} type="file" accept="image/jpeg,image/png,image/webp" className="hidden" onChange={(e) => onFile(e.target.files?.[0] || null)} />
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ÉTAPE 2 : description */}
+        {step === 1 && (
+          <div>
+            <h2 className="text-xl font-bold">{mode === "PROMPT_ONLY" ? "Décrivez votre vidéo" : "Que doit-il se passer dans l'image ?"}</h2>
+            <div className="mt-5">
+              <div className="flex items-baseline justify-between">
+                <label htmlFor="prompt" className="label">Description</label>
+                <span className="mb-1.5 text-xs text-muted">{prompt.length}/1500</span>
+              </div>
+              <textarea
+                id="prompt"
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value.slice(0, 1500))}
+                rows={6}
+                placeholder={EXAMPLES[mode]}
+                className="input resize-y leading-relaxed"
+              />
+              <button type="button" onClick={() => setPrompt(EXAMPLES[mode])} className="mt-2 text-sm font-semibold text-brand hover:underline">
+                Utiliser un exemple
+              </button>
+            </div>
+
+            <div className="mt-6">
+              <p className="label">Mouvement de caméra</p>
+              <div className="flex flex-wrap gap-2">
+                {CAMERAS.map((c) => (
+                  <button key={c} type="button" className="chip" aria-pressed={camera === c} onClick={() => setCamera(c)}>
+                    {c}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ÉTAPE 3 : réglages */}
+        {step === 2 && (
+          <div className="space-y-7">
             <div>
-              <label className="text-sm font-medium">Format</label>
-              <div className="mt-2 flex flex-wrap gap-2">
+              <h2 className="text-xl font-bold">Format</h2>
+              <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
                 {FORMATS.map((f) => (
                   <button
-                    key={f}
+                    key={f.id}
                     type="button"
-                    onClick={() => setFormat(f)}
-                    className={`rounded-full px-3 py-1.5 text-xs font-medium ${
-                      format === f
-                        ? "bg-slate-900 text-white dark:bg-white dark:text-slate-900"
-                        : "bg-slate-100 text-slate-600 dark:bg-slate-800"
-                    }`}
+                    aria-pressed={format === f.id}
+                    onClick={() => setFormat(f.id)}
+                    className={`flex flex-col items-center rounded-2xl border-2 p-3 text-center transition-colors ${format === f.id ? "border-brand bg-brand-soft" : "border-line hover:border-muted/50"}`}
                   >
-                    {f}
+                    <span className="flex h-16 items-center">
+                      <span
+                        className={`block rounded-md border-2 ${format === f.id ? "border-brand" : "border-muted/60"}`}
+                        style={{ aspectRatio: f.id.replace(":", " / "), height: f.id === "16:9" ? 36 : f.id === "1:1" ? 48 : 60 }}
+                      />
+                    </span>
+                    <span className="mt-1 text-sm font-semibold">{f.id}</span>
+                    <span className="text-xs text-muted">{f.label}</span>
                   </button>
                 ))}
               </div>
+              <p className="hint">{FORMATS.find((f) => f.id === format)?.hint}</p>
             </div>
+
             <div>
-              <label className="text-sm font-medium">Durée</label>
-              <div className="mt-2 flex flex-wrap gap-2">
+              <h2 className="text-xl font-bold">Durée</h2>
+              <div className="mt-4 flex flex-wrap gap-2">
                 {DURATIONS.map((d) => (
-                  <button
-                    key={d}
-                    type="button"
-                    onClick={() => setDuration(d)}
-                    className={`rounded-full px-3 py-1.5 text-xs font-medium ${
-                      duration === d
-                        ? "bg-slate-900 text-white dark:bg-white dark:text-slate-900"
-                        : "bg-slate-100 text-slate-600 dark:bg-slate-800"
-                    }`}
-                  >
-                    {d}s
+                  <button key={d} type="button" className="chip !px-4 !py-2.5" aria-pressed={duration === d} onClick={() => setDuration(d)}>
+                    {d} s <span className="ml-2 text-xs opacity-70">{COSTS[d]} crédit{COSTS[d] > 1 ? "s" : ""}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <h2 className="text-xl font-bold">Style</h2>
+              <div className="mt-4 flex flex-wrap gap-2">
+                {STYLES.map((s) => (
+                  <button key={s.id} type="button" className="chip" aria-pressed={style === s.id} onClick={() => setStyle(s.id)}>
+                    {s.label}
                   </button>
                 ))}
               </div>
             </div>
           </div>
+        )}
 
+        {/* ÉTAPE 4 : récapitulatif */}
+        {step === 3 && (
           <div>
-            <label className="text-sm font-medium">Style</label>
-            <div className="mt-2 flex flex-wrap gap-2">
-              {STYLES.map((s) => (
-                <button
-                  key={s.id}
-                  type="button"
-                  onClick={() => setStyle(s.id)}
-                  className={`rounded-full px-3 py-1.5 text-xs font-medium ${
-                    style === s.id
-                      ? "bg-violet-600 text-white"
-                      : "bg-slate-100 text-slate-600 dark:bg-slate-800"
-                  }`}
-                >
-                  {s.label}
-                </button>
-              ))}
+            <h2 className="text-xl font-bold">Vérifiez avant de lancer</h2>
+            <div className="mt-5 grid gap-6 sm:grid-cols-[minmax(0,220px)_1fr]">
+              <div className="mx-auto w-full max-w-[220px]">
+                <ViewFinder ratio={format} rec>
+                  {mode === "IMAGE_TO_VIDEO" && preview ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={preview} alt="Image de départ" className="h-full w-full object-cover" />
+                  ) : (
+                    <p className="flex h-full items-center justify-center p-6 text-center text-xs leading-relaxed text-muted">
+                      {prompt.length > 110 ? prompt.slice(0, 110) + "…" : prompt}
+                    </p>
+                  )}
+                </ViewFinder>
+              </div>
+
+              <dl className="divide-y divide-line text-sm">
+                {[
+                  ["Mode", mode === "PROMPT_ONLY" ? "Texte → vidéo" : "Image → vidéo"],
+                  ["Format", format],
+                  ["Durée", `${duration} secondes`],
+                  ["Style", STYLES.find((s) => s.id === style)?.label],
+                  ["Caméra", camera],
+                ].map(([k, v]) => (
+                  <div key={k} className="flex justify-between gap-4 py-2.5">
+                    <dt className="text-muted">{k}</dt>
+                    <dd className="text-right font-semibold">{v}</dd>
+                  </div>
+                ))}
+                <div className="py-2.5">
+                  <dt className="text-muted">Description</dt>
+                  <dd className="mt-1 line-clamp-4 font-medium">{prompt}</dd>
+                </div>
+              </dl>
+            </div>
+
+            <div className={`mt-6 flex items-center justify-between rounded-2xl border px-4 py-3 ${notEnough ? "border-bad/40 bg-bad-soft" : "border-line bg-paper"}`}>
+              <div>
+                <p className="text-sm text-muted">Coût de cette vidéo</p>
+                {credits !== null && <p className={`text-xs ${notEnough ? "text-bad" : "text-muted"}`}>Votre solde : {credits} crédit{credits > 1 ? "s" : ""}</p>}
+              </div>
+              <p className="font-display text-2xl font-bold">{cost} crédit{cost > 1 ? "s" : ""}</p>
             </div>
           </div>
+        )}
 
-          <div>
-            <label className="text-sm font-medium">Mouvement de caméra</label>
-            <select
-              value={camera}
-              onChange={(e) => setCamera(e.target.value)}
-              className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-800"
-            >
-              {CAMERAS.map((c) => (
-                <option key={c}>{c}</option>
-              ))}
-            </select>
+        {error && (
+          <div className="mt-5">
+            <Alert>{error}</Alert>
           </div>
+        )}
 
-          {error && (
-            <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/40">
-              {error}
-            </div>
+        <div className="mt-7 flex items-center justify-between border-t border-line pt-5">
+          {step === 0 ? (
+            <Link href="/dashboard" className="btn-ghost">Annuler</Link>
+          ) : (
+            <button type="button" className="btn-ghost" onClick={() => { setError(""); setStep(step - 1); }}>
+              Retour
+            </button>
           )}
 
-          <div className="flex items-center justify-between border-t border-slate-100 pt-4 dark:border-slate-800">
-            <p className="text-sm text-slate-500">
-              Coût : <span className="font-semibold text-slate-900 dark:text-white">{COSTS[duration]} crédits</span>
-            </p>
-            <button
-              type="button"
-              disabled={submitting || uploading}
-              onClick={handleGenerate}
-              className="rounded-full bg-gradient-to-r from-violet-600 to-sky-600 px-8 py-3 text-sm font-semibold text-white shadow-lg shadow-violet-500/25 transition hover:opacity-95 disabled:opacity-50"
-            >
-              {submitting ? "Envoi…" : "Générer la vidéo"}
+          {step < 3 ? (
+            <button type="button" className="btn-primary" onClick={next} disabled={uploading}>
+              Continuer
             </button>
-          </div>
+          ) : (
+            <button type="button" className="btn-primary !px-6 !py-3" onClick={generate} disabled={submitting || notEnough}>
+              {submitting ? "Envoi en cours…" : "Générer la vidéo"}
+            </button>
+          )}
         </div>
-
-        {!getApiUrl() && (
-          <p className="mt-4 text-center text-xs text-amber-600">
-            Attention : NEXT_PUBLIC_API_URL n&apos;est pas définie — les appels API échoueront en production.
-          </p>
-        )}
-      </div>
+      </section>
     </div>
   );
 }

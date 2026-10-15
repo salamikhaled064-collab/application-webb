@@ -1,109 +1,146 @@
 /**
- * Centralized API client.
- * NEXT_PUBLIC_API_URL is baked in at Next.js build time on Render.
+ * Client API centralisé.
+ *
+ * Toutes les requêtes passent par /api/* sur le MÊME domaine que le site
+ * (voir app/api/[...path]/route.ts, qui relaie vers l'API). Plus de CORS, plus de
+ * cookies tiers, plus besoin de NEXT_PUBLIC_API_URL au build.
  */
 
-const API_URL = (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/$/, "");
-
-export function getApiUrl(): string {
-  if (API_URL) return API_URL;
-
-  // Development only – never fall back to localhost in production builds
-  if (process.env.NODE_ENV !== "production") {
-    return "http://localhost:3001";
+export class ApiError extends Error {
+  status: number;
+  code?: string;
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
   }
+}
 
+/** Chemin à utiliser pour <video src>, <a href>, etc. (toujours same-origin) */
+export function apiUrl(path: string): string {
+  return path;
+}
+
+/** Conservé pour compatibilité : l'API est désormais toujours jointe en same-origin. */
+export function getApiUrl(): string {
   return "";
 }
 
 export function getNetworkErrorMessage(error: unknown): string {
+  if (error instanceof ApiError) return error.message;
   if (error instanceof TypeError) {
-    return "Impossible de contacter le serveur. Vérifiez NEXT_PUBLIC_API_URL et que l'API est en ligne.";
+    return "Connexion impossible. Vérifiez votre connexion internet puis réessayez.";
   }
-  if (error instanceof Error) return error.message;
+  if (error instanceof Error && error.message) return error.message;
   return "Une erreur inconnue est survenue.";
 }
 
-async function getCsrfToken(): Promise<string> {
-  const base = getApiUrl();
-  if (!base) return "";
-  try {
-    const res = await fetch(`${base}/api/auth/csrf`, { credentials: "include" });
-    if (!res.ok) return "";
-    const data = await res.json().catch(() => ({}));
-    return data.csrfToken || data.token || "";
-  } catch {
-    return "";
-  }
+/** Prévient le Header (crédits, rôle) qu'il doit se rafraîchir. */
+export function notifyAuthChanged() {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("auth:refresh"));
 }
+
+let csrfToken = "";
+
+async function getCsrfToken(force = false): Promise<string> {
+  if (csrfToken && !force) return csrfToken;
+  const res = await fetch("/api/auth/csrf", { credentials: "same-origin", cache: "no-store" });
+  if (!res.ok) throw await toError(res);
+  const data = await res.json().catch(() => ({}));
+  csrfToken = data.csrfToken || data.token || "";
+  return csrfToken;
+}
+
+async function toError(res: Response): Promise<ApiError> {
+  let message = "";
+  let code: string | undefined;
+  try {
+    const body = await res.json();
+    message = body.error || body.message || "";
+    code = body.code;
+  } catch {
+    /* corps non JSON */
+  }
+  if (!message) {
+    if (res.status === 401) message = "Session expirée. Reconnectez-vous.";
+    else if (res.status === 402) message = "Crédits insuffisants.";
+    else if (res.status === 403) message = "Accès refusé.";
+    else if (res.status === 404) message = "Introuvable.";
+    else if (res.status === 429) message = "Trop de requêtes. Patientez un instant.";
+    else if (res.status >= 502 && res.status <= 504)
+      message = "Le serveur démarre ou est indisponible. Réessayez dans 30 secondes.";
+    else message = "Une erreur serveur est survenue.";
+  }
+  return new ApiError(message, res.status, code);
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export async function apiFetch<T = any>(
   path: string,
   options: RequestInit & { skipJson?: boolean } = {}
 ): Promise<T> {
-  const base = getApiUrl();
-  if (!base) {
-    throw new Error(
-      "NEXT_PUBLIC_API_URL est manquante. Configurez l'URL de l'API sur Render puis redéployez le frontend."
-    );
-  }
-
   const method = (options.method || "GET").toUpperCase();
-  const headers: Record<string, string> = {
-    ...(options.headers as Record<string, string>),
-  };
+  const isWrite = ["POST", "PATCH", "PUT", "DELETE"].includes(method);
 
+  const baseHeaders: Record<string, string> = { ...(options.headers as Record<string, string>) };
   const isForm = typeof FormData !== "undefined" && options.body instanceof FormData;
-  if (!isForm && options.body && !headers["Content-Type"]) {
-    headers["Content-Type"] = "application/json";
+  if (!isForm && options.body && !baseHeaders["Content-Type"]) {
+    baseHeaders["Content-Type"] = "application/json";
   }
 
-  if (["POST", "PATCH", "PUT", "DELETE"].includes(method)) {
-    const csrf = await getCsrfToken();
-    if (csrf) headers["X-CSRF-Token"] = csrf;
-  }
+  let csrfRetried = false;
+  let transientRetries = method === "GET" ? 2 : 0; // une API en veille se réveille en ~30 s
 
-  let response: Response;
-  try {
-    response = await fetch(`${base}${path}`, {
-      ...options,
-      credentials: "include",
-      headers,
-    });
-  } catch (err) {
-    throw new Error(getNetworkErrorMessage(err));
-  }
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const headers = { ...baseHeaders };
+    if (isWrite) {
+      try {
+        headers["X-CSRF-Token"] = await getCsrfToken(csrfRetried);
+      } catch (e) {
+        if (transientRetries-- > 0) {
+          await sleep(2500);
+          continue;
+        }
+        throw e instanceof ApiError ? e : new ApiError(getNetworkErrorMessage(e), 0);
+      }
+    }
 
-  if (response.status === 401) {
-    throw Object.assign(new Error("Session expirée. Reconnectez-vous."), {
-      status: 401,
-    });
-  }
-  if (response.status === 403) {
-    let message = "Accès refusé.";
+    let res: Response;
     try {
-      const body = await response.json();
-      message = body.error || body.message || message;
-    } catch {
-      /* */
+      res = await fetch(path, {
+        ...options,
+        credentials: "same-origin",
+        headers,
+        cache: "no-store",
+      });
+    } catch (err) {
+      if (transientRetries-- > 0) {
+        await sleep(2500);
+        continue;
+      }
+      throw new ApiError(getNetworkErrorMessage(err), 0);
     }
-    throw Object.assign(new Error(message), { status: 403 });
-  }
 
-  if (!response.ok) {
-    let message = "Une erreur serveur est survenue";
-    try {
-      const body = await response.json();
-      message = body.error || body.message || message;
-    } catch {
-      /* */
+    if (res.status >= 502 && res.status <= 504 && transientRetries-- > 0) {
+      await sleep(3000);
+      continue;
     }
-    if (response.status === 402) {
-      message = message || "Crédits insuffisants.";
-    }
-    throw Object.assign(new Error(message), { status: response.status });
-  }
 
-  if (options.skipJson || response.status === 204) return undefined as T;
-  return response.json();
+    if (res.status === 403 && isWrite && !csrfRetried) {
+      const err = await toError(res.clone());
+      if (err.code === "CSRF") {
+        csrfRetried = true;
+        csrfToken = "";
+        continue;
+      }
+    }
+
+    if (!res.ok) throw await toError(res);
+
+    if (options.skipJson || res.status === 204) return undefined as T;
+    return res.json();
+  }
 }

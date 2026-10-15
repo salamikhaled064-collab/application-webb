@@ -9,6 +9,7 @@ import * as creditService from "../services/credit-service";
 import * as storage from "../services/storage-service";
 import {
   setJobHandler,
+  enqueueGeneration,
   initQueue,
   closeQueue,
   getBullConnection,
@@ -181,18 +182,17 @@ export async function processGeneration(data: { generationId: string }) {
 
       if (status.status === "completed" && status.videoUrl) {
         let videoStorageKey: string | null = null;
-        try {
-          const dl = await storage.downloadVideoToStorage(
-            status.videoUrl,
-            config.maxVideoSizeMb * 1024 * 1024
-          );
-          videoStorageKey = dl.storageKey;
-        } catch (dlErr: any) {
-          // Mock demo URL may fail download — keep URL for mock only
-          if (config.videoProvider !== "mock") {
+        // Mock : vidéo de démonstration servie par redirection, on ne la télécharge pas.
+        if (config.videoProvider !== "mock") {
+          try {
+            const dl = await storage.downloadVideoToStorage(
+              status.videoUrl,
+              config.maxVideoSizeMb * 1024 * 1024
+            );
+            videoStorageKey = dl.storageKey;
+          } catch (dlErr: any) {
             throw new Error(`Téléchargement vidéo impossible: ${dlErr.message}`);
           }
-          safeLog("worker", "mock video not stored locally", { error: dlErr.message });
         }
 
         await prisma.videoGeneration.update({
@@ -248,63 +248,96 @@ export async function processGeneration(data: { generationId: string }) {
   }
 }
 
-export function startWorkerInProcess() {
-  setJobHandler(async (data) => {
-    try {
-      await processGeneration(data);
-    } catch (err: any) {
-      // In-memory queue: no BullMQ retries – permanent fail already handled or log
-      if (err instanceof TemporaryError || err.name === "TemporaryError") {
-        safeLog("worker", "temporary error in-process (no Redis retry)", { error: err.message });
-      }
+const FINAL_STATES = ["completed", "failed", "cancelled"];
+
+/** Après épuisement des tentatives BullMQ : statut failed + remboursement (une seule fois). */
+async function failAndRefund(generationId: string, message: string) {
+  try {
+    const g = await prisma.videoGeneration.findUnique({ where: { id: generationId } });
+    if (g && !FINAL_STATES.includes(g.status)) {
+      await prisma.videoGeneration.update({
+        where: { id: generationId },
+        data: { status: "failed", errorMessage: message || "Échec après retries", completedAt: new Date() },
+      });
+      await creditService.refundCredits(g.userId, g.creditsUsed, generationId);
+    }
+  } catch (e: any) {
+    safeLog("worker", "failAndRefund error", { error: e?.message });
+  }
+}
+
+async function startBullWorker() {
+  const connection = getBullConnection();
+  const { Worker } = await import("bullmq");
+  const worker = new Worker(
+    getQueueName(),
+    async (job) => {
+      await processGeneration(job.data);
+    },
+    { connection, concurrency: config.queue.concurrency }
+  );
+  worker.on("failed", (job, err) => {
+    safeLog("worker", "job attempt failed", { id: job?.id, error: err.message });
+    const attempts = job?.opts?.attempts ?? 1;
+    if (job?.data?.generationId && job.attemptsMade >= attempts) {
+      void failAndRefund(job.data.generationId, err.message);
     }
   });
-  safeLog("worker", `In-process handler ready (provider=${config.videoProvider})`);
+  worker.on("error", (err) => safeLog("worker", "worker error", { error: err.message }));
+  safeLog("worker", `BullMQ worker started concurrency=${config.queue.concurrency}`);
+  return worker;
+}
+
+/**
+ * Au démarrage : relance les générations restées bloquées (serveur redémarré,
+ * file mémoire perdue…) pour qu'elles ne restent jamais "en cours" indéfiniment.
+ */
+export async function recoverStuckGenerations() {
+  try {
+    const stuck = await prisma.videoGeneration.findMany({
+      where: { status: { in: ["pending", "queued", "processing"] } },
+      select: { id: true },
+      take: 200,
+    });
+    for (const g of stuck) {
+      await prisma.videoGeneration.update({
+        where: { id: g.id },
+        data: { status: "queued", progress: 0 },
+      });
+      await enqueueGeneration(g.id).catch(() => {});
+    }
+    if (stuck.length) safeLog("worker", `Recovered ${stuck.length} stuck generation(s)`);
+  } catch (e: any) {
+    safeLog("worker", "recover error", { error: e?.message });
+  }
+}
+
+/** Worker dans le même processus que l'API (RUN_WORKER_IN_API=true). */
+export async function startWorkerInProcess() {
+  if (getBullConnection()) {
+    await startBullWorker();
+  } else {
+    setJobHandler(async (data) => {
+      try {
+        await processGeneration(data);
+      } catch (err: any) {
+        // File mémoire : pas de retry BullMQ → on échoue proprement et on rembourse.
+        await failAndRefund(data.generationId, err?.message || "Erreur");
+      }
+    });
+    safeLog("worker", `In-process memory handler ready (provider=${config.videoProvider})`);
+  }
+  await recoverStuckGenerations();
 }
 
 async function main() {
   await initQueue();
-  const connection = getBullConnection();
 
-  if (!connection || !config.redisUrl) {
-    safeLog("worker", "No Redis – standalone worker needs REDIS_URL");
-    startWorkerInProcess();
+  if (!getBullConnection() || !config.redisUrl) {
+    safeLog("worker", "No Redis – standalone worker needs REDIS_URL, using in-process handler");
+    await startWorkerInProcess();
   } else {
-    const { Worker } = await import("bullmq");
-    const worker = new Worker(
-      getQueueName(),
-      async (job) => {
-        await processGeneration(job.data);
-      },
-      {
-        connection,
-        concurrency: config.queue.concurrency,
-      }
-    );
-    worker.on("failed", (job, err) => {
-      safeLog("worker", "job failed after retries", { id: job?.id, error: err.message });
-      // After all BullMQ attempts exhausted, ensure failed + refund
-      if (job?.data?.generationId) {
-        const gid = job.data.generationId;
-        prisma.videoGeneration
-          .findUnique({ where: { id: gid } })
-          .then(async (g) => {
-            if (g && !["completed", "failed", "cancelled"].includes(g.status)) {
-              await prisma.videoGeneration.update({
-                where: { id: gid },
-                data: {
-                  status: "failed",
-                  errorMessage: err.message || "Échec après retries",
-                  completedAt: new Date(),
-                },
-              });
-              await creditService.refundCredits(g.userId, g.creditsUsed, gid);
-            }
-          })
-          .catch(() => {});
-      }
-    });
-    safeLog("worker", `BullMQ worker started concurrency=${config.queue.concurrency}`);
+    await startBullWorker();
   }
 
   const shutdown = async (sig: string) => {

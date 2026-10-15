@@ -1,4 +1,4 @@
-# AI Video SaaS v1.4
+# Vidéo IA v1.5
 
 ## Corrections de cette version
 
@@ -26,3 +26,8 @@ ADMIN_BOOTSTRAP_EMAIL=... ADMIN_BOOTSTRAP_PASSWORD=... npm run admin:create
 ## Déploiement
 
 Voir **[DEPLOY.md](./DEPLOY.md)** — guide GitHub → Render complet.
+
+## v1.5 — correctifs
+
+Voir **[RENDER_FIX_FAILED_TO_FETCH.md](./RENDER_FIX_FAILED_TO_FETCH.md)** : proxy same-origin, migration SQL
+corrigée (colonne `mode`), build API réparé, admin automatique, nouvelle interface claire.

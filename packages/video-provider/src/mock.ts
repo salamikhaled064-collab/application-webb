@@ -1,6 +1,11 @@
 /**
- * MockVideoProvider – permet de développer et tester sans clé API réelle.
- * Simule une génération qui passe par les états queued → processing → completed.
+ * MockVideoProvider – développement et tests sans clé API.
+ *
+ * SANS ÉTAT : l'avancement est calculé à partir de l'horodatage encodé dans
+ * l'identifiant du job (mock_<timestamp>_<random>). Ainsi l'API, le worker ou un
+ * redémarrage du serveur donnent toujours le même résultat (l'ancienne version
+ * gardait les jobs dans une Map mémoire : "Job mock introuvable" dès que le
+ * worker tournait dans un autre processus).
  */
 
 import type {
@@ -9,48 +14,22 @@ import type {
   VideoProvider,
 } from "./types";
 
-const jobs = new Map<
-  string,
-  {
-    createdAt: number;
-    request: VideoGenerationRequest;
-    status: VideoGenerationResult["status"];
-  }
->();
+const MOCK_DURATION_MS = 8000;
+
+/** Petite vidéo de démonstration (~1 Mo) – l'ancienne faisait ~150 Mo. */
+export const MOCK_VIDEO_URL =
+  "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4";
 
 export class MockVideoProvider implements VideoProvider {
   readonly name = "mock";
 
   async createVideo(
-    request: VideoGenerationRequest,
+    _request: VideoGenerationRequest,
     _apiKey: string,
     _signal?: AbortSignal
   ): Promise<VideoGenerationResult> {
     const id = `mock_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-
-    jobs.set(id, {
-      createdAt: Date.now(),
-      request,
-      status: "queued",
-    });
-
-    // Simule un passage rapide à processing
-    setTimeout(() => {
-      const job = jobs.get(id);
-      if (job) job.status = "processing";
-    }, 1500);
-
-    // Simule la completion après ~8 secondes
-    setTimeout(() => {
-      const job = jobs.get(id);
-      if (job) job.status = "completed";
-    }, 8000);
-
-    return {
-      providerJobId: id,
-      status: "queued",
-      progress: 0,
-    };
+    return { providerJobId: id, status: "queued", progress: 0 };
   }
 
   async getVideoStatus(
@@ -58,35 +37,22 @@ export class MockVideoProvider implements VideoProvider {
     _apiKey: string,
     _signal?: AbortSignal
   ): Promise<VideoGenerationResult> {
-    const job = jobs.get(providerJobId);
-
-    if (!job) {
-      return {
-        providerJobId,
-        status: "failed",
-        errorMessage: "Job mock introuvable.",
-      };
+    const created = Number(providerJobId.split("_")[1]);
+    if (!Number.isFinite(created)) {
+      return { providerJobId, status: "failed", errorMessage: "Identifiant mock invalide." };
     }
 
-    const elapsed = Date.now() - job.createdAt;
-    let progress = 0;
-
-    if (job.status === "queued") progress = 5;
-    else if (job.status === "processing") {
-      progress = Math.min(95, Math.floor((elapsed / 8000) * 100));
-    } else if (job.status === "completed") progress = 100;
-
-    // URL de démonstration (vidéo publique libre de droits)
-    const videoUrl =
-      job.status === "completed"
-        ? "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
-        : undefined;
-
+    const elapsed = Date.now() - created;
+    if (elapsed >= MOCK_DURATION_MS) {
+      return { providerJobId, status: "completed", progress: 100, videoUrl: MOCK_VIDEO_URL };
+    }
+    if (elapsed < 1500) {
+      return { providerJobId, status: "queued", progress: 5 };
+    }
     return {
       providerJobId,
-      status: job.status,
-      progress,
-      videoUrl,
+      status: "processing",
+      progress: Math.min(95, Math.max(10, Math.floor((elapsed / MOCK_DURATION_MS) * 100))),
     };
   }
 }

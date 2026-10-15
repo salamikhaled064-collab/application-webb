@@ -1,31 +1,45 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
-import { useParams, useRouter } from "next/navigation";
-import { apiFetch, getApiUrl, getNetworkErrorMessage } from "../../../lib/api";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useParams, useRouter } from "next/navigation";
+import { apiFetch, apiUrl, getNetworkErrorMessage, notifyAuthChanged } from "../../../lib/api";
+import { Alert, MODE_LABEL, Spinner, StatusBadge, ViewFinder } from "../../../components/ui";
 
-const API = getApiUrl();
+const FINAL = ["completed", "failed", "cancelled"];
+const MAX_W: Record<string, string> = {
+  "9:16": "max-w-[320px]",
+  "4:5": "max-w-[420px]",
+  "1:1": "max-w-[520px]",
+  "16:9": "max-w-full",
+};
 
 export default function GenerationDetailPage() {
   const params = useParams();
   const router = useRouter();
   const id = params.id as string;
+
   const [gen, setGen] = useState<any>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [videoFailed, setVideoFailed] = useState(false);
+  const failures = useRef(0);
 
   const load = useCallback(async () => {
     try {
       const data = await apiFetch(`/api/generations/${id}`);
+      failures.current = 0;
       setGen(data);
       setError("");
+      if (FINAL.includes(data.status)) notifyAuthChanged(); // crédits mis à jour (remboursement éventuel)
     } catch (e: any) {
-      if (e.status === 401) {
-        router.push("/login");
-        return;
-      }
-      setError(getNetworkErrorMessage(e));
+      if (e?.status === 401) return router.push("/login");
+      failures.current += 1;
+      // Un raté passager pendant le suivi ne doit pas effacer la page
+      setGen((g: any) => {
+        if (!g || failures.current >= 3) setError(getNetworkErrorMessage(e));
+        return g;
+      });
     } finally {
       setLoading(false);
     }
@@ -35,115 +49,127 @@ export default function GenerationDetailPage() {
     load();
   }, [load]);
 
+  const status = gen?.status;
   useEffect(() => {
-    if (!gen) return;
-    if (["completed", "failed", "cancelled"].includes(gen.status)) return;
+    if (!status || FINAL.includes(status)) return;
     const t = setInterval(load, 2500);
     return () => clearInterval(t);
-  }, [gen?.status, load]);
+  }, [status, load]);
 
   async function cancel() {
-    await apiFetch(`/api/generations/${id}/cancel`, { method: "POST" });
-    load();
+    try {
+      await apiFetch(`/api/generations/${id}/cancel`, { method: "POST" });
+      await load();
+    } catch (e) {
+      setError(getNetworkErrorMessage(e));
+    }
   }
 
   if (loading) {
     return (
       <div className="flex min-h-[50vh] items-center justify-center">
-        <div className="h-10 w-10 animate-spin rounded-full border-4 border-sky-500 border-t-transparent" />
+        <Spinner />
       </div>
     );
   }
 
-  if (error || !gen) {
+  if (!gen) {
     return (
-      <div className="mx-auto max-w-lg px-4 py-16 text-center">
-        <p className="text-red-600">{error || "Génération introuvable"}</p>
-        <Link href="/history" className="mt-4 inline-block text-sky-600 hover:underline">
-          Retour à l&apos;historique
-        </Link>
+      <div className="mx-auto max-w-md px-4 py-16 text-center">
+        <Alert>{error || "Génération introuvable."}</Alert>
+        <Link href="/history" className="btn-secondary mt-5">Retour à l&apos;historique</Link>
       </div>
     );
   }
 
-  // Always proxy via API – never expose Agnes or external provider URLs
-  const videoSrc =
-    gen.status === "completed" ? `${API}/api/generations/${id}/video` : null;
+  const active = !FINAL.includes(gen.status);
+  const src = apiUrl(`/api/generations/${id}/video`);
 
   return (
-    <div className="mx-auto max-w-3xl px-4 py-10">
-      <div className="mb-6 flex items-center justify-between">
-        <div>
-          <Link href="/history" className="text-sm text-sky-600 hover:underline">
-            ← Historique
-          </Link>
-          <h1 className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">Génération</h1>
-          <p className="font-mono text-xs text-slate-400">{id}</p>
-        </div>
-        <span
-          className={`rounded-full px-3 py-1 text-xs font-semibold ${
-            gen.status === "completed"
-              ? "bg-emerald-100 text-emerald-800"
-              : gen.status === "failed"
-              ? "bg-red-100 text-red-800"
-              : gen.status === "cancelled"
-              ? "bg-slate-100 text-slate-600"
-              : "bg-sky-100 text-sky-800"
-          }`}
-        >
-          {gen.status}
-        </span>
+    <div className="mx-auto max-w-4xl px-4 py-8 sm:py-12">
+      <Link href="/history" className="text-sm font-semibold text-brand hover:underline">← Historique</Link>
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+        <h1 className="text-3xl font-bold">Votre vidéo</h1>
+        <StatusBadge status={gen.status} />
       </div>
 
-      {!["completed", "failed", "cancelled"].includes(gen.status) && (
-        <div className="mb-6 rounded-2xl border border-sky-200 bg-sky-50 p-6 dark:border-sky-900 dark:bg-sky-950/40">
-          <div className="mb-2 flex justify-between text-sm">
-            <span>Progression</span>
-            <span className="font-semibold">{gen.progress ?? 0}%</span>
-          </div>
-          <div className="h-3 overflow-hidden rounded-full bg-sky-100 dark:bg-sky-900">
-            <div
-              className="h-full rounded-full bg-sky-500 transition-all duration-500"
-              style={{ width: `${gen.progress ?? 0}%` }}
-            />
-          </div>
-          <button onClick={cancel} className="mt-4 text-sm text-red-600 hover:underline">
-            Annuler
-          </button>
-        </div>
-      )}
+      <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
+        <div className={`mx-auto w-full ${MAX_W[gen.format] ?? "max-w-full"}`}>
+          <ViewFinder ratio={gen.format} rec={active}>
+            {gen.status === "completed" && !videoFailed && (
+              <video
+                src={src}
+                controls
+                playsInline
+                autoPlay
+                muted
+                loop
+                onError={() => setVideoFailed(true)}
+                className="absolute inset-0 h-full w-full bg-black object-contain"
+              />
+            )}
+            {active && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 p-8 text-center">
+                <p className="font-display text-5xl font-bold tabular-nums">{gen.progress ?? 0}%</p>
+                <div className="h-2 w-full max-w-[220px] overflow-hidden rounded-full bg-line">
+                  <div className="h-full rounded-full bg-brand transition-all duration-700" style={{ width: `${gen.progress ?? 0}%` }} />
+                </div>
+                <p className="text-sm text-muted">
+                  {gen.status === "processing" ? "L'IA crée votre vidéo…" : "En file d'attente…"}
+                </p>
+              </div>
+            )}
+            {gen.status === "failed" && <p className="absolute inset-0 flex items-center justify-center p-8 text-center text-sm text-muted">Aucune vidéo générée.</p>}
+            {gen.status === "cancelled" && <p className="absolute inset-0 flex items-center justify-center p-8 text-center text-sm text-muted">Génération annulée.</p>}
+            {gen.status === "completed" && videoFailed && (
+              <p className="absolute inset-0 flex items-center justify-center p-8 text-center text-sm text-muted">
+                La vidéo n&apos;est plus disponible. Elle a peut-être expiré après un redémarrage du serveur.
+              </p>
+            )}
+          </ViewFinder>
 
-      {gen.status === "completed" && videoSrc && (
-        <div className="overflow-hidden rounded-2xl border border-slate-200 bg-black shadow-lg dark:border-slate-700">
-          <video src={videoSrc} controls className="w-full" playsInline />
-          <div className="flex gap-3 bg-slate-900 p-4">
-            <a
-              href={`${API}/api/generations/${id}/download`}
-              className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-700"
-            >
-              Télécharger
+          {gen.status === "completed" && !videoFailed && (
+            <a href={apiUrl(`/api/generations/${id}/download`)} download className="btn-primary mt-4 w-full">
+              Télécharger la vidéo
             </a>
+          )}
+          {active && (
+            <button onClick={cancel} className="btn-ghost mt-3 w-full text-bad">
+              Annuler la génération
+            </button>
+          )}
+        </div>
+
+        <aside className="space-y-4">
+          {gen.status === "failed" && (
+            <Alert>
+              {gen.errorMessage || "La génération a échoué."}
+              {gen.creditStatus === "refunded" && " Vos crédits ont été remboursés."}
+            </Alert>
+          )}
+          {error && <Alert tone="warn">{error}</Alert>}
+
+          <div className="card p-5 text-sm">
+            <p className="text-muted">Description</p>
+            <p className="mt-1 font-medium leading-relaxed">{gen.prompt}</p>
+            <dl className="mt-4 divide-y divide-line">
+              {[
+                ["Mode", MODE_LABEL[gen.mode] || gen.mode],
+                ["Format", gen.format],
+                ["Durée", `${gen.durationSeconds} s`],
+                ["Style", gen.style && gen.style !== "none" ? gen.style : "Aucun"],
+                ["Crédits", `${gen.creditsUsed}`],
+              ].map(([k, v]) => (
+                <div key={k} className="flex justify-between py-2">
+                  <dt className="text-muted">{k}</dt>
+                  <dd className="font-semibold">{v}</dd>
+                </div>
+              ))}
+            </dl>
           </div>
-        </div>
-      )}
 
-      {gen.status === "failed" && (
-        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-          {gen.errorMessage || "Échec de la génération"}
-        </div>
-      )}
-
-      <div className="mt-8 grid gap-4 rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-700 dark:bg-slate-900 sm:grid-cols-2">
-        <div>
-          <p className="text-xs uppercase text-slate-400">Prompt</p>
-          <p className="mt-1 text-sm">{gen.prompt}</p>
-        </div>
-        <div className="space-y-2 text-sm">
-          <p><span className="text-slate-400">Format :</span> {gen.format}</p>
-          <p><span className="text-slate-400">Style :</span> {gen.style || "—"}</p>
-          <p><span className="text-slate-400">Durée :</span> {gen.durationSeconds}s</p>
-          <p><span className="text-slate-400">Crédits :</span> {gen.creditsUsed} ({gen.creditStatus})</p>
-        </div>
+          <Link href="/create" className="btn-secondary w-full">Créer une autre vidéo</Link>
+        </aside>
       </div>
     </div>
   );

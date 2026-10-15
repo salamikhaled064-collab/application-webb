@@ -1,190 +1,191 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-
+import { useRouter } from "next/navigation";
 import { apiFetch, getNetworkErrorMessage } from "../../lib/api";
+import { Alert, IconShield, MODE_LABEL, Spinner, StatusBadge } from "../../components/ui";
 
-/** Thin wrapper – apiFetch already handles CSRF + credentials */
-async function api(path: string, opts: RequestInit = {}) {
-  return apiFetch(path, opts);
-}
+type Tab = "overview" | "keys" | "users" | "gens";
+const TABS: { id: Tab; label: string }[] = [
+  { id: "overview", label: "Vue d'ensemble" },
+  { id: "keys", label: "Clés API" },
+  { id: "users", label: "Utilisateurs" },
+  { id: "gens", label: "Générations" },
+];
+
+const KEY_STATUS: Record<string, string> = { active: "Active", disabled: "Désactivée", cooldown: "En pause (limite atteinte)" };
 
 export default function AdminPage() {
-  const [forbidden, setForbidden] = useState(false);
+  const router = useRouter();
+  const [state, setState] = useState<"loading" | "ok" | "forbidden" | "error">("loading");
+  const [error, setError] = useState("");
+  const [tab, setTab] = useState<Tab>("overview");
+
   const [stats, setStats] = useState<any>(null);
   const [keys, setKeys] = useState<any[]>([]);
   const [users, setUsers] = useState<any[]>([]);
   const [gens, setGens] = useState<any[]>([]);
   const [newKey, setNewKey] = useState("");
-  const [msg, setMsg] = useState("");
-  const [tab, setTab] = useState<"stats" | "keys" | "users" | "gens">("stats");
+  const [notice, setNotice] = useState<{ tone: "success" | "error"; text: string } | null>(null);
+  const [grant, setGrant] = useState<Record<string, string>>({});
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const me = await api("/api/auth/me");
-        if (me.user?.role !== "admin") {
-          setForbidden(true);
-          return;
-        }
-        const [s, k, u, g] = await Promise.all([
-          api("/api/admin/stats"),
-          api("/api/admin/api-keys"),
-          api("/api/admin/users"),
-          api("/api/admin/generations"),
-        ]);
-        setStats(s);
-        setKeys(k.keys || []);
-        setUsers(u.users || []);
-        setGens(g.generations || []);
-      } catch {
-        setForbidden(true);
-      }
-    })();
-  }, []);
-
-  async function addKey() {
+  const loadAll = useCallback(async () => {
     try {
-      setMsg("");
-      await api("/api/admin/api-keys", {
-        method: "POST",
-        body: JSON.stringify({ key: newKey }),
-      });
-      setNewKey("");
-      const k = await api("/api/admin/api-keys");
+      const me = await apiFetch<{ user: { role: string } }>("/api/auth/me");
+      if (me.user?.role !== "admin") return setState("forbidden");
+      const [s, k, u, g] = await Promise.all([
+        apiFetch("/api/admin/stats"),
+        apiFetch("/api/admin/api-keys"),
+        apiFetch("/api/admin/users"),
+        apiFetch("/api/admin/generations"),
+      ]);
+      setStats(s);
       setKeys(k.keys || []);
-      setMsg("Clé ajoutée (masquée)");
+      setUsers(u.users || []);
+      setGens(g.generations || []);
+      setState("ok");
     } catch (e: any) {
-      setMsg(e.message);
+      if (e?.status === 401) return router.push("/login");
+      if (e?.status === 403) return setState("forbidden");
+      // Une erreur réseau n'est PAS un refus d'accès : on le dit clairement
+      setError(getNetworkErrorMessage(e));
+      setState("error");
+    }
+  }, [router]);
+
+  useEffect(() => { loadAll(); }, [loadAll]);
+
+  async function run(action: () => Promise<unknown>, success: string) {
+    setNotice(null);
+    try {
+      await action();
+      setNotice({ tone: "success", text: success });
+      await loadAll();
+    } catch (e) {
+      setNotice({ tone: "error", text: getNetworkErrorMessage(e) });
     }
   }
 
-  async function setKeyStatus(id: string, status: "active" | "disabled") {
-    await api(`/api/admin/api-keys/${id}`, {
-      method: "PATCH",
-      body: JSON.stringify({ status }),
-    });
-    const k = await api("/api/admin/api-keys");
-    setKeys(k.keys || []);
+  if (state === "loading") {
+    return <div className="flex min-h-[50vh] items-center justify-center"><Spinner /></div>;
   }
 
-  async function deleteKey(id: string) {
-    if (!confirm("Supprimer cette clé ?")) return;
-    await api(`/api/admin/api-keys/${id}`, { method: "DELETE" });
-    const k = await api("/api/admin/api-keys");
-    setKeys(k.keys || []);
-  }
-
-  if (forbidden) {
+  if (state === "error") {
     return (
-      <div className="flex min-h-[60vh] items-center justify-center">
-        <div className="rounded-2xl border border-red-200 bg-red-50 p-8 text-center dark:border-red-900 dark:bg-red-950/40">
-          <p className="text-lg font-semibold text-red-700 dark:text-red-300">Accès refusé</p>
-          <p className="mt-2 text-sm text-red-600">Réservé aux administrateurs.</p>
-          <Link href="/" className="mt-4 inline-block text-sm text-sky-600 hover:underline">
-            Retour
-          </Link>
+      <div className="mx-auto max-w-md px-4 py-16 text-center">
+        <Alert>{error}</Alert>
+        <button onClick={() => { setState("loading"); loadAll(); }} className="btn-secondary mt-5">Réessayer</button>
+      </div>
+    );
+  }
+
+  if (state === "forbidden") {
+    return (
+      <div className="mx-auto max-w-lg px-4 py-16">
+        <div className="card p-7 text-center">
+          <IconShield className="mx-auto h-9 w-9 text-muted" />
+          <h1 className="mt-3 text-2xl font-bold">Réservé aux administrateurs</h1>
+          <p className="mt-2 text-sm text-muted">
+            Ce compte n&apos;est pas administrateur. Pour en créer un, définissez <code className="rounded bg-sunken px-1.5 py-0.5">ADMIN_BOOTSTRAP_EMAIL</code> et{" "}
+            <code className="rounded bg-sunken px-1.5 py-0.5">ADMIN_BOOTSTRAP_PASSWORD</code> sur le service API, puis redéployez.
+          </p>
+          <Link href="/dashboard" className="btn-secondary mt-5">Retour au tableau de bord</Link>
         </div>
       </div>
     );
   }
 
-  return (
-    <div className="mx-auto max-w-5xl px-4 py-10">
-      <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Administration</h1>
-      <p className="mt-1 text-sm text-slate-500">Gestion des clés API, utilisateurs et générations</p>
+  const fmt = (d?: string) => (d ? new Date(d).toLocaleString("fr-FR", { dateStyle: "short", timeStyle: "short" }) : "—");
 
-      <div className="mt-6 flex gap-2 border-b border-slate-200 dark:border-slate-700">
-        {(["stats", "keys", "users", "gens"] as const).map((t) => (
+  return (
+    <div className="mx-auto max-w-6xl px-4 py-8 sm:py-12">
+      <div className="flex items-center gap-3">
+        <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-accent text-[#14172B]"><IconShield /></span>
+        <div>
+          <h1 className="text-3xl font-bold">Administration</h1>
+          <p className="text-sm text-muted">Clés API, utilisateurs, crédits et générations.</p>
+        </div>
+      </div>
+
+      <div className="mt-6 flex gap-1 overflow-x-auto border-b border-line" role="tablist">
+        {TABS.map((t) => (
           <button
-            key={t}
-            onClick={() => setTab(t)}
-            className={`px-4 py-2 text-sm font-medium ${
-              tab === t
-                ? "border-b-2 border-sky-600 text-sky-700"
-                : "text-slate-500 hover:text-slate-800"
-            }`}
+            key={t.id}
+            role="tab"
+            aria-selected={tab === t.id}
+            onClick={() => setTab(t.id)}
+            className={`-mb-px whitespace-nowrap border-b-2 px-4 py-2.5 text-sm font-semibold transition-colors ${tab === t.id ? "border-brand text-brand" : "border-transparent text-muted hover:text-ink"}`}
           >
-            {t === "stats" && "Stats"}
-            {t === "keys" && "Clés API"}
-            {t === "users" && "Utilisateurs"}
-            {t === "gens" && "Générations"}
+            {t.label}
           </button>
         ))}
       </div>
 
-      {tab === "stats" && stats && (
-        <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+      {notice && <div className="mt-5"><Alert tone={notice.tone}>{notice.text}</Alert></div>}
+
+      {tab === "overview" && stats && (
+        <div className="mt-6 grid grid-cols-2 gap-4 lg:grid-cols-3">
           {[
             ["Utilisateurs", stats.users],
             ["Générations", stats.generations],
+            ["En cours", stats.processing ?? 0],
             ["Terminées", stats.completed],
             ["Échouées", stats.failed],
-            ["Clés actives", stats.activeKeys],
+            ["Clés API actives", stats.activeKeys],
           ].map(([l, v]) => (
-            <div key={l as string} className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900">
-              <p className="text-xs uppercase text-slate-400">{l as string}</p>
-              <p className="mt-1 text-2xl font-bold">{v as number}</p>
+            <div key={l as string} className="card p-5">
+              <p className="text-sm text-muted">{l}</p>
+              <p className="mt-2 font-display text-4xl font-bold tabular-nums">{v as number}</p>
             </div>
           ))}
         </div>
       )}
 
       {tab === "keys" && (
-        <div className="mt-6 space-y-4">
-          <div className="flex gap-2">
-            <input
-              type="password"
-              value={newKey}
-              onChange={(e) => setNewKey(e.target.value)}
-              placeholder="Nouvelle clé Agnes (ne sera jamais affichée en clair)"
-              className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-800"
-            />
-            <button
-              onClick={addKey}
-              className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-700"
-            >
-              Ajouter
-            </button>
+        <div className="mt-6 space-y-5">
+          <div className="card p-5">
+            <label htmlFor="newkey" className="label">Ajouter une clé Agnes</label>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <input id="newkey" type="password" autoComplete="off" value={newKey} onChange={(e) => setNewKey(e.target.value)} placeholder="Collez la clé : elle ne sera plus jamais affichée en clair" className="input" />
+              <button
+                className="btn-primary shrink-0"
+                disabled={newKey.trim().length < 8}
+                onClick={() => run(async () => { await apiFetch("/api/admin/api-keys", { method: "POST", body: JSON.stringify({ key: newKey.trim() }) }); setNewKey(""); }, "Clé ajoutée.")}
+              >
+                Ajouter la clé
+              </button>
+            </div>
+            <p className="hint">Les clés sont chiffrées en base. Pour utiliser les vraies vidéos, passez VIDEO_PROVIDER à « agnes » sur le service API.</p>
           </div>
-          {msg && <p className="text-sm text-slate-600">{msg}</p>}
-          <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-700">
+
+          <div className="card overflow-x-auto">
             <table className="w-full text-left text-sm">
-              <thead className="bg-slate-50 dark:bg-slate-800">
+              <thead className="border-b border-line text-muted">
                 <tr>
-                  <th className="p-3">Masquée</th>
-                  <th className="p-3">Statut</th>
-                  <th className="p-3">Usage</th>
-                  <th className="p-3">Erreurs</th>
-                  <th className="p-3">Cooldown</th>
-                  <th className="p-3">Actions</th>
+                  {["Clé", "Statut", "Utilisations", "Erreurs", "Pause jusqu'à", ""].map((h) => (
+                    <th key={h} className="whitespace-nowrap p-3.5 font-semibold">{h}</th>
+                  ))}
                 </tr>
               </thead>
-              <tbody>
+              <tbody className="divide-y divide-line">
+                {keys.length === 0 && (
+                  <tr><td colSpan={6} className="p-8 text-center text-muted">Aucune clé enregistrée.</td></tr>
+                )}
                 {keys.map((k) => (
-                  <tr key={k.id} className="border-t border-slate-100 dark:border-slate-800">
-                    <td className="p-3 font-mono text-xs">{k.maskedKey}</td>
-                    <td className="p-3">{k.status}</td>
-                    <td className="p-3">{k.usageCount}</td>
-                    <td className="p-3">{k.errorCount}</td>
-                    <td className="p-3 text-xs">
-                      {k.disabledUntil ? new Date(k.disabledUntil).toLocaleString() : "—"}
-                    </td>
-                    <td className="p-3 space-x-2">
-                      {k.status !== "active" && (
-                        <button onClick={() => setKeyStatus(k.id, "active")} className="text-emerald-600 text-xs">
-                          Activer
-                        </button>
+                  <tr key={k.id}>
+                    <td className="p-3.5 font-mono text-xs">{k.maskedKey}</td>
+                    <td className="p-3.5">{KEY_STATUS[k.status] || k.status}</td>
+                    <td className="p-3.5 tabular-nums">{k.usageCount}</td>
+                    <td className="p-3.5 tabular-nums">{k.errorCount}</td>
+                    <td className="p-3.5 text-xs">{fmt(k.disabledUntil)}</td>
+                    <td className="space-x-3 whitespace-nowrap p-3.5 text-right">
+                      {k.status === "active" ? (
+                        <button className="text-sm font-semibold text-warn hover:underline" onClick={() => run(() => apiFetch(`/api/admin/api-keys/${k.id}`, { method: "PATCH", body: JSON.stringify({ status: "disabled" }) }), "Clé désactivée.")}>Désactiver</button>
+                      ) : (
+                        <button className="text-sm font-semibold text-ok hover:underline" onClick={() => run(() => apiFetch(`/api/admin/api-keys/${k.id}`, { method: "PATCH", body: JSON.stringify({ status: "active" }) }), "Clé activée.")}>Activer</button>
                       )}
-                      {k.status === "active" && (
-                        <button onClick={() => setKeyStatus(k.id, "disabled")} className="text-amber-600 text-xs">
-                          Désactiver
-                        </button>
-                      )}
-                      <button onClick={() => deleteKey(k.id)} className="text-red-600 text-xs">
-                        Supprimer
-                      </button>
+                      <button className="text-sm font-semibold text-bad hover:underline" onClick={() => { if (confirm("Supprimer cette clé ?")) run(() => apiFetch(`/api/admin/api-keys/${k.id}`, { method: "DELETE" }), "Clé supprimée."); }}>Supprimer</button>
                     </td>
                   </tr>
                 ))}
@@ -195,50 +196,75 @@ export default function AdminPage() {
       )}
 
       {tab === "users" && (
-        <div className="mt-6 overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-700">
+        <div className="card mt-6 overflow-x-auto">
           <table className="w-full text-left text-sm">
-            <thead className="bg-slate-50 dark:bg-slate-800">
+            <thead className="border-b border-line text-muted">
               <tr>
-                <th className="p-3">E-mail</th>
-                <th className="p-3">Rôle</th>
-                <th className="p-3">Crédits</th>
-                <th className="p-3">Créé</th>
+                {["Utilisateur", "Rôle", "Crédits", "Inscrit le", "Ajouter des crédits"].map((h) => (
+                  <th key={h} className="whitespace-nowrap p-3.5 font-semibold">{h}</th>
+                ))}
               </tr>
             </thead>
-            <tbody>
-              {users.map((u) => (
-                <tr key={u.id} className="border-t border-slate-100 dark:border-slate-800">
-                  <td className="p-3">{u.email}</td>
-                  <td className="p-3">{u.role}</td>
-                  <td className="p-3">{u.credits}</td>
-                  <td className="p-3 text-xs">{new Date(u.createdAt).toLocaleDateString()}</td>
-                </tr>
-              ))}
+            <tbody className="divide-y divide-line">
+              {users.map((u) => {
+                const amount = parseInt(grant[u.id] || "", 10);
+                return (
+                  <tr key={u.id}>
+                    <td className="p-3.5">
+                      <p className="font-medium">{u.email}</p>
+                      {u.name && <p className="text-xs text-muted">{u.name}</p>}
+                    </td>
+                    <td className="p-3.5">{u.role === "admin" ? <span className="rounded-full bg-accent/40 px-2.5 py-0.5 text-xs font-semibold">Admin</span> : "Utilisateur"}</td>
+                    <td className="p-3.5 font-semibold tabular-nums">{u.credits}</td>
+                    <td className="whitespace-nowrap p-3.5 text-xs">{fmt(u.createdAt)}</td>
+                    <td className="p-3.5">
+                      <div className="flex gap-2">
+                        <input
+                          type="number"
+                          inputMode="numeric"
+                          aria-label={`Crédits à ajouter à ${u.email}`}
+                          value={grant[u.id] || ""}
+                          onChange={(e) => setGrant((g) => ({ ...g, [u.id]: e.target.value }))}
+                          placeholder="ex : 10"
+                          className="input !w-24 !py-1.5"
+                        />
+                        <button
+                          className="btn-secondary !py-1.5"
+                          disabled={!Number.isInteger(amount) || amount === 0}
+                          onClick={() => run(async () => { await apiFetch(`/api/admin/users/${u.id}/credits`, { method: "POST", body: JSON.stringify({ amount }) }); setGrant((g) => ({ ...g, [u.id]: "" })); }, "Crédits mis à jour.")}
+                        >
+                          Valider
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
       )}
 
       {tab === "gens" && (
-        <div className="mt-6 overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-700">
+        <div className="card mt-6 overflow-x-auto">
           <table className="w-full text-left text-sm">
-            <thead className="bg-slate-50 dark:bg-slate-800">
+            <thead className="border-b border-line text-muted">
               <tr>
-                <th className="p-3">ID</th>
-                <th className="p-3">Statut</th>
-                <th className="p-3">Crédits</th>
-                <th className="p-3">Erreur</th>
-                <th className="p-3">Date</th>
+                {["Date", "Utilisateur", "Mode", "Statut", "Crédits", "Erreur"].map((h) => (
+                  <th key={h} className="whitespace-nowrap p-3.5 font-semibold">{h}</th>
+                ))}
               </tr>
             </thead>
-            <tbody>
+            <tbody className="divide-y divide-line">
+              {gens.length === 0 && <tr><td colSpan={6} className="p-8 text-center text-muted">Aucune génération.</td></tr>}
               {gens.map((g) => (
-                <tr key={g.id} className="border-t border-slate-100 dark:border-slate-800">
-                  <td className="p-3 font-mono text-xs">{g.id.slice(0, 12)}…</td>
-                  <td className="p-3">{g.status}</td>
-                  <td className="p-3">{g.creditsUsed} ({g.creditStatus})</td>
-                  <td className="p-3 text-xs text-red-600">{g.errorMessage || "—"}</td>
-                  <td className="p-3 text-xs">{new Date(g.createdAt).toLocaleString()}</td>
+                <tr key={g.id}>
+                  <td className="whitespace-nowrap p-3.5 text-xs">{fmt(g.createdAt)}</td>
+                  <td className="p-3.5 text-xs">{g.user?.email || "—"}</td>
+                  <td className="whitespace-nowrap p-3.5 text-xs">{MODE_LABEL[g.mode] || g.mode} · {g.format} · {g.durationSeconds} s</td>
+                  <td className="p-3.5"><StatusBadge status={g.status} /></td>
+                  <td className="whitespace-nowrap p-3.5 text-xs">{g.creditsUsed} ({g.creditStatus})</td>
+                  <td className="max-w-xs p-3.5 text-xs text-bad">{g.errorMessage || ""}</td>
                 </tr>
               ))}
             </tbody>

@@ -10,19 +10,19 @@ export function issueCsrfToken(req: Request, res: Response) {
   if (!token || typeof token !== "string" || token.length < 16) {
     token = crypto.randomBytes(32).toString("hex");
     res.cookie(CSRF_COOKIE, token, {
-      httpOnly: false, // readable by JS for X-CSRF-Token
+      httpOnly: false, // lisible par JS pour l'en-tête X-CSRF-Token
       secure: config.isProd,
-      sameSite: config.isProd ? "none" : "lax",
+      sameSite: config.cookieSameSite,
       maxAge: config.sessionMaxAgeMs,
       path: "/",
     });
   }
-  return token;
+  return token as string;
 }
 
 /**
- * CSRF protection for state-changing methods.
- * Exempt: GET, HEAD, OPTIONS, and /api/health
+ * Protection CSRF pour les méthodes qui modifient l'état.
+ * Exemptés : GET, HEAD, OPTIONS et les routes de santé.
  */
 export function csrfProtection(req: Request, res: Response, next: NextFunction) {
   if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return next();
@@ -32,13 +32,16 @@ export function csrfProtection(req: Request, res: Response, next: NextFunction) 
   const headerToken = req.headers[CSRF_HEADER] as string | undefined;
 
   if (!cookieToken || !headerToken || cookieToken !== headerToken) {
-    return res.status(403).json({ error: "CSRF token invalide ou manquant" });
+    return res.status(403).json({
+      error: "Session de sécurité expirée. Rechargez la page puis réessayez.",
+      code: "CSRF",
+    });
   }
 
-  // Origin check when present
+  // Vérification de l'origine quand elle est présente (compare sans slash final)
   const origin = req.headers.origin;
-  if (origin && origin !== config.webUrl) {
-    return res.status(403).json({ error: "Origine non autorisée" });
+  if (origin && !config.allowedOrigins.includes(String(origin).replace(/\/+$/, ""))) {
+    return res.status(403).json({ error: "Origine non autorisée", code: "ORIGIN" });
   }
 
   next();

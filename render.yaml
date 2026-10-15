@@ -1,26 +1,15 @@
-# Render Blueprint – requires shared object storage (R2/S3) for API + Worker
-# See DEPLOY.md for GitHub + Render step-by-step
+# Render Blueprint – version simplifiée : 2 services + 1 base PostgreSQL.
+#  - ai-video-api : l'API ET le worker de génération dans le même processus
+#  - ai-video-web : le site (Next.js) ; il relaie /api/* vers l'API (aucun CORS, aucun cookie tiers)
+# Redis et le stockage S3/R2 sont OPTIONNELS (voir DEPLOY.md).
 
 services:
-  - type: web
-    name: ai-video-web
-    runtime: node
-    plan: starter
-    buildCommand: npm install && npm run build:web
-    startCommand: npm run start:web
-    envVars:
-      - key: NODE_ENV
-        value: production
-      - key: NEXT_TELEMETRY_DISABLED
-        value: "1"
-      - key: NEXT_PUBLIC_API_URL
-        sync: false
-
   - type: web
     name: ai-video-api
     runtime: node
     plan: starter
-    buildCommand: npm install && npx prisma generate && npm run build:api
+    # --include=dev : indispensable, NODE_ENV=production ferait sauter TypeScript au build
+    buildCommand: npm install --include=dev && npx prisma generate && npm run build:api
     startCommand: npx prisma migrate deploy && npm run start:api
     healthCheckPath: /api/health
     envVars:
@@ -30,76 +19,40 @@ services:
         fromDatabase:
           name: ai-video-db
           property: connectionString
-      - key: REDIS_URL
-        fromService:
-          type: keyvalue
-          name: ai-video-redis
-          property: connectionString
-      - key: WEB_URL
-        sync: false
       - key: SESSION_SECRET
         generateValue: true
       - key: ENCRYPTION_KEY
-        sync: false
+        generateValue: true
       - key: VIDEO_PROVIDER
-        value: mock
+        value: mock # passez à "agnes" quand une clé est ajoutée dans /admin
       - key: RUN_WORKER_IN_API
-        value: "false"
+        value: "true"
       - key: STORAGE_PROVIDER
-        value: s3
-      - key: S3_ENDPOINT
+        value: local
+      # Compte administrateur créé / mis à jour automatiquement au démarrage.
+      # Renseignez-les au premier déploiement, puis SUPPRIMEZ le mot de passe.
+      - key: ADMIN_BOOTSTRAP_EMAIL
         sync: false
-      - key: S3_REGION
-        value: auto
-      - key: S3_BUCKET
-        sync: false
-      - key: S3_ACCESS_KEY_ID
-        sync: false
-      - key: S3_SECRET_ACCESS_KEY
+      - key: ADMIN_BOOTSTRAP_PASSWORD
         sync: false
 
-  - type: worker
-    name: ai-video-worker
+  - type: web
+    name: ai-video-web
     runtime: node
     plan: starter
-    buildCommand: npm install && npx prisma generate && npm run build:api
-    startCommand: npm run start:worker
+    buildCommand: npm install --include=dev && npm run build:web
+    startCommand: npm run start:web
     envVars:
       - key: NODE_ENV
         value: production
-      - key: DATABASE_URL
-        fromDatabase:
-          name: ai-video-db
-          property: connectionString
-      - key: REDIS_URL
+      - key: NEXT_TELEMETRY_DISABLED
+        value: "1"
+      # Adresse INTERNE de l'API (réseau privé Render), lue au démarrage : aucun rebuild nécessaire.
+      - key: API_URL
         fromService:
-          type: keyvalue
-          name: ai-video-redis
-          property: connectionString
-      - key: VIDEO_PROVIDER
-        value: mock
-      - key: ENCRYPTION_KEY
-        sync: false
-      - key: RUN_WORKER_IN_API
-        value: "false"
-      - key: STORAGE_PROVIDER
-        value: s3
-      - key: S3_ENDPOINT
-        sync: false
-      - key: S3_REGION
-        value: auto
-      - key: S3_BUCKET
-        sync: false
-      - key: S3_ACCESS_KEY_ID
-        sync: false
-      - key: S3_SECRET_ACCESS_KEY
-        sync: false
-
-  - type: keyvalue
-    name: ai-video-redis
-    plan: starter
-    maxmemoryPolicy: noeviction
-    ipAllowList: []
+          type: web
+          name: ai-video-api
+          property: hostport
 
 databases:
   - name: ai-video-db

@@ -61,6 +61,16 @@ export async function createGeneration(input: CreateGenerationInput) {
   const duration = VIDEO_DURATIONS[durationSeconds];
   const cost = creditService.getCost(durationSeconds);
 
+  // Vérification AVANT de créer la ligne : évite de polluer l'historique avec des échecs "Crédits insuffisants"
+  const owner = await prisma.user.findUnique({ where: { id: userId }, select: { credits: true } });
+  if (!owner) throw Object.assign(new Error("Utilisateur introuvable"), { status: 404 });
+  if (owner.credits < cost) {
+    throw Object.assign(
+      new Error(`Crédits insuffisants : cette vidéo coûte ${cost} crédits, il vous en reste ${owner.credits}.`),
+      { status: 402 }
+    );
+  }
+
   const finalPrompt = buildFinalPrompt(prompt.trim(), style, input.cameraMovement, input.mood);
 
   const generation = await prisma.videoGeneration.create({

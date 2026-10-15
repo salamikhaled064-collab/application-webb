@@ -21,7 +21,7 @@ function setSessionCookie(res: any, sessionId: string) {
   res.cookie("session_id", sessionId, {
     httpOnly: true,
     secure: config.isProd,
-    sameSite: config.isProd ? "none" : "lax",
+    sameSite: config.cookieSameSite,
     maxAge: config.sessionMaxAgeMs,
     path: "/",
   });
@@ -31,7 +31,7 @@ function clearSessionCookie(res: any) {
   res.clearCookie("session_id", {
     httpOnly: true,
     secure: config.isProd,
-    sameSite: config.isProd ? "none" : "lax",
+    sameSite: config.cookieSameSite,
     path: "/",
   });
 }

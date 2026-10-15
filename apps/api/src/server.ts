@@ -8,6 +8,7 @@ import * as storage from "./services/storage-service";
 import { initQueue, closeQueue } from "./queues/generation-queue";
 import { prisma } from "./lib/prisma";
 import { csrfProtection, issueCsrfToken } from "./middleware/csrf";
+import { bootstrapAdmin } from "./lib/bootstrap-admin";
 
 import authRoutes from "./routes/auth";
 import uploadRoutes from "./routes/uploads";
@@ -18,6 +19,10 @@ import adminRoutes from "./routes/admin";
 storage.ensureStorageDirs();
 
 const app = express();
+
+// Derrière Render / le proxy Next : sans ça, req.ip = IP du proxy pour TOUS les
+// utilisateurs et le rate-limit global les bloque tous ensemble.
+app.set("trust proxy", config.trustProxy);
 
 app.use(
   helmet({
@@ -30,12 +35,13 @@ app.use(
 app.use(
   cors({
     origin: (origin, cb) => {
-      const allowed = [config.webUrl];
-      if (!origin || allowed.includes(origin)) return cb(null, true);
+      if (!origin || config.allowedOrigins.includes(origin.replace(/\/+$/, ""))) {
+        return cb(null, true);
+      }
       return cb(new Error("CORS not allowed"));
     },
     credentials: true,
-    methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization", "X-CSRF-Token"],
   })
 );
@@ -55,8 +61,11 @@ app.use(
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 20,
-  message: { error: "Trop de tentatives d'authentification" },
+  max: 30,
+  skipSuccessfulRequests: true, // seules les tentatives échouées comptent
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Trop de tentatives, réessayez dans quelques minutes" },
 });
 
 // Health exempt from CSRF
@@ -93,27 +102,61 @@ app.use("/api/generations", generationRoutes);
 app.use("/api/credits", creditsRoutes);
 app.use("/api/admin", adminRoutes);
 
+// Route API inconnue → JSON propre (et non une page HTML)
+app.use("/api", (_req, res) => {
+  res.status(404).json({ error: "Route introuvable" });
+});
+
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  safeLog("error", err.message || "unknown");
-  if (err.message === "CORS not allowed") {
+  safeLog("error", err?.message || "unknown");
+  if (err?.message === "CORS not allowed") {
     return res.status(403).json({ error: "Origine non autorisée" });
   }
-  res.status(err.status || 500).json({ error: "Erreur interne" });
+  if (err?.type === "entity.too.large") {
+    return res.status(413).json({ error: "Requête trop volumineuse" });
+  }
+  if (err?.type === "entity.parse.failed") {
+    return res.status(400).json({ error: "JSON invalide" });
+  }
+  if (err?.name === "ZodError") {
+    return res.status(400).json({ error: err.errors?.[0]?.message || "Données invalides" });
+  }
+  if (err?.code === "P2025") {
+    return res.status(404).json({ error: "Élément introuvable" });
+  }
+  const status = Number(err?.status) || 500;
+  // Les erreurs 4xx portent un message destiné à l'utilisateur ; les 5xx restent génériques.
+  res.status(status).json({ error: status < 500 && err?.message ? err.message : "Erreur interne" });
+});
+
+// Une promesse rejetée ne doit JAMAIS faire tomber l'API : on journalise et on continue.
+process.on("unhandledRejection", (reason: any) => {
+  console.error("[api] unhandledRejection:", reason?.message || reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[api] uncaughtException:", err?.message || err);
 });
 
 async function main() {
+  // On écoute d'abord : le healthcheck Render passe tout de suite, même si Redis est lent.
+  const server = app.listen(config.port, "0.0.0.0", () => {
+    safeLog("api", `Listening on 0.0.0.0:${config.port}`);
+    safeLog("api", `Provider=${config.videoProvider} origins=${config.allowedOrigins.join(",")}`);
+  });
+
   await initQueue();
+
+  try {
+    await bootstrapAdmin();
+  } catch (e: any) {
+    safeLog("admin", `bootstrap échoué: ${e?.message}`);
+  }
 
   if (config.runWorkerInApi) {
     const { startWorkerInProcess } = await import("./workers/generation-worker");
-    startWorkerInProcess();
-    safeLog("api", "In-process worker enabled (dev / no Redis)");
+    await startWorkerInProcess();
+    safeLog("api", "In-process worker enabled");
   }
-
-  const server = app.listen(config.port, "0.0.0.0", () => {
-    safeLog("api", `Listening on 0.0.0.0:${config.port}`);
-    safeLog("api", `Provider=${config.videoProvider} CORS=${config.webUrl}`);
-  });
 
   const shutdown = async (sig: string) => {
     safeLog("api", `${sig} received, shutting down`);

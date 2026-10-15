@@ -1,3 +1,4 @@
+import { describe, it, expect } from "vitest";
 /**
  * Run with: npx vitest run (after npm i -D vitest)
  * These tests validate pure functions without DB.

@@ -10,6 +10,12 @@ function required(key: string, fallback?: string): string {
   return val;
 }
 
+function normalizeOrigin(value: string): string {
+  const v = (value || "").trim().replace(/\/+$/, "");
+  if (!v) return "";
+  return /^https?:\/\//i.test(v) ? v : `https://${v}`;
+}
+
 const nodeEnv = process.env.NODE_ENV || "development";
 const isProd = nodeEnv === "production";
 
@@ -31,7 +37,25 @@ export const config = {
   nodeEnv,
   isProd,
   port: parseInt(process.env.PORT || process.env.API_PORT || "3001", 10),
-  webUrl: process.env.WEB_URL || "http://localhost:3000",
+  webUrl: normalizeOrigin(process.env.WEB_URL || "http://localhost:3000"),
+  /** Origines autorisées (CORS + CSRF). WEB_URL + WEB_URLS (liste séparée par des virgules). */
+  allowedOrigins: [
+    process.env.WEB_URL || "http://localhost:3000",
+    ...(process.env.WEB_URLS || "").split(","),
+  ]
+    .map((o) => normalizeOrigin(o))
+    .filter(Boolean),
+  /**
+   * "lax" (défaut) : le frontend appelle l'API via son proxy same-origin (/api/*).
+   * "none" : uniquement si le navigateur appelle l'API directement sur un autre domaine.
+   */
+  cookieSameSite: (process.env.COOKIE_SAMESITE === "none" ? "none" : "lax") as "lax" | "none",
+  /** Nombre de proxys devant l'API (Render + proxy Next = 1 grâce au X-Forwarded-For normalisé). */
+  trustProxy: parseInt(process.env.TRUST_PROXY || "1", 10),
+  adminBootstrap: {
+    email: (process.env.ADMIN_BOOTSTRAP_EMAIL || "").trim().toLowerCase(),
+    password: process.env.ADMIN_BOOTSTRAP_PASSWORD || "",
+  },
   databaseUrl: required(
     "DATABASE_URL",
     isProd ? "" : "file:./data/app.sqlite"
@@ -107,10 +131,10 @@ if (config.storageProvider === "s3") {
 }
 
 
-// Fail-fast: Redis obligatoire en production
+// Redis est optionnel : sans lui, file d'attente en mémoire + reprise au démarrage.
 if (config.isProd && !config.redisUrl) {
-  throw new Error(
-    "[security] REDIS_URL est obligatoire en production. Configurez Redis (Render Key Value) et redéployez."
+  console.warn(
+    "[config] REDIS_URL absent : file d'attente en mémoire (les générations en cours sont relancées au redémarrage)."
   );
 }
 

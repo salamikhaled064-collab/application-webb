@@ -4,124 +4,111 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { apiFetch, getNetworkErrorMessage } from "../../lib/api";
+import { Alert, MODE_LABEL, Spinner, StatusBadge } from "../../components/ui";
+
+const FILTERS = [
+  { id: "all", label: "Toutes" },
+  { id: "PROMPT_ONLY", label: "Texte → vidéo" },
+  { id: "IMAGE_TO_VIDEO", label: "Image → vidéo" },
+  { id: "processing", label: "En cours" },
+  { id: "completed", label: "Terminées" },
+  { id: "failed", label: "Échouées" },
+];
 
 export default function HistoryPage() {
   const router = useRouter();
-  const [generations, setGenerations] = useState<any[]>([]);
+  const [items, setItems] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
   const [filter, setFilter] = useState("all");
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const data = await apiFetch<{ generations: any[] }>("/api/generations");
-        setGenerations(data.generations || []);
-      } catch (e: any) {
-        if (e.status === 401) router.push("/login");
-        setGenerations([]);
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, [router]);
+  async function load() {
+    try {
+      const data = await apiFetch<{ generations: any[] }>("/api/generations");
+      setItems(data.generations || []);
+      setError("");
+    } catch (e: any) {
+      if (e?.status === 401) return router.push("/login");
+      setError(getNetworkErrorMessage(e));
+    } finally {
+      setLoading(false);
+    }
+  }
 
-    const filtered = generations.filter((g) => {
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); }, []);
+
+  async function remove(id: string) {
+    if (!confirm("Supprimer cette vidéo définitivement ?")) return;
+    try {
+      await apiFetch(`/api/generations/${id}`, { method: "DELETE" });
+      setItems((list) => list.filter((g) => g.id !== id));
+    } catch (e) {
+      setError(getNetworkErrorMessage(e));
+    }
+  }
+
+  const shown = items.filter((g) => {
     if (filter === "all") return true;
-    if (filter === "completed") return g.status === "completed";
     if (filter === "processing") return ["pending", "queued", "processing"].includes(g.status);
-    if (filter === "failed") return g.status === "failed";
-    if (filter === "cancelled") return g.status === "cancelled";
-    if (filter === "PROMPT_ONLY") return (g.mode || "IMAGE_TO_VIDEO") === "PROMPT_ONLY";
-    if (filter === "IMAGE_TO_VIDEO") return (g.mode || "IMAGE_TO_VIDEO") === "IMAGE_TO_VIDEO";
-    return true;
+    if (filter === "completed" || filter === "failed") return g.status === filter;
+    return (g.mode || "IMAGE_TO_VIDEO") === filter;
   });
 
   return (
-    <div className="min-h-[calc(100vh-3.5rem)] bg-slate-50 dark:bg-slate-950">
-      <div className="mx-auto max-w-6xl px-4 py-10">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Historique</h1>
-            <p className="mt-1 text-sm text-slate-500">Toutes vos générations</p>
-          </div>
-          <div className="flex gap-2">
-            <select
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-800"
-            >
-              <option value="all">Toutes</option>
-              <option value="PROMPT_ONLY">Prompt uniquement</option>
-              <option value="IMAGE_TO_VIDEO">Image + prompt</option>
-              <option value="processing">En cours</option>
-              <option value="completed">Terminées</option>
-              <option value="failed">Échouées</option>
-              <option value="cancelled">Annulées</option>
-            </select>
-            <Link
-              href="/create"
-              className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-700"
-            >
-              + Nouvelle
-            </Link>
-          </div>
+    <div className="mx-auto max-w-6xl px-4 py-8 sm:py-12">
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-bold">Historique</h1>
+          <p className="mt-1 text-sm text-muted">{items.length} génération{items.length > 1 ? "s" : ""}</p>
         </div>
-
-        {loading ? (
-          <div className="mt-16 flex justify-center">
-            <div className="h-10 w-10 animate-spin rounded-full border-4 border-sky-500 border-t-transparent" />
-          </div>
-        ) : filtered.length === 0 ? (
-          <div className="mt-8 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-700 dark:bg-slate-900">
-            <div className="flex flex-col items-center justify-center py-16 text-center">
-              <div className="flex h-16 w-16 items-center justify-center rounded-full bg-slate-100 text-3xl dark:bg-slate-800">
-                📁
-              </div>
-              <p className="mt-4 text-sm font-medium text-slate-700 dark:text-slate-300">
-                Aucune génération
-              </p>
-              <Link href="/create" className="mt-4 text-sm text-sky-600 hover:underline">
-                Créer votre première vidéo
-              </Link>
-            </div>
-          </div>
-        ) : (
-          <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {filtered.map((g) => (
-              <Link
-                key={g.id}
-                href={`/generations/${g.id}`}
-                className="block rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-sky-300 hover:shadow-md dark:border-slate-700 dark:bg-slate-900"
-              >
-                <div className="flex items-start justify-between">
-                  <span
-                    className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
-                      g.status === "completed"
-                        ? "bg-emerald-100 text-emerald-700"
-                        : g.status === "failed"
-                        ? "bg-red-100 text-red-700"
-                        : "bg-sky-100 text-sky-700"
-                    }`}
-                  >
-                    {g.status}
-                  </span>
-                  <span className="text-xs text-slate-400">
-                    {new Date(g.createdAt).toLocaleDateString()}
-                  </span>
-                </div>
-                <p className="mt-3 line-clamp-2 text-sm text-slate-700 dark:text-slate-300">
-                  {g.prompt}
-                </p>
-                <div className="mt-3 flex gap-3 text-xs text-slate-400">
-                  <span>{g.format}</span>
-                  <span>{g.durationSeconds}s</span>
-                  <span>{g.creditsUsed} crédits</span>
-                </div>
-              </Link>
-            ))}
-          </div>
-        )}
+        <Link href="/create" className="btn-primary">Nouvelle vidéo</Link>
       </div>
+
+      <div className="mt-6 flex flex-wrap gap-2">
+        {FILTERS.map((f) => (
+          <button key={f.id} className="chip" aria-pressed={filter === f.id} onClick={() => setFilter(f.id)}>
+            {f.label}
+          </button>
+        ))}
+      </div>
+
+      {error && <div className="mt-5"><Alert>{error}</Alert></div>}
+
+      {loading ? (
+        <div className="mt-16 flex justify-center"><Spinner /></div>
+      ) : shown.length === 0 ? (
+        <div className="card mt-8 px-6 py-16 text-center">
+          <p className="font-display text-xl font-bold">{items.length === 0 ? "Aucune vidéo pour le moment" : "Aucun résultat pour ce filtre"}</p>
+          {items.length === 0 && (
+            <>
+              <p className="mt-1 text-sm text-muted">Créez votre première vidéo en moins d&apos;une minute.</p>
+              <Link href="/create" className="btn-primary mt-5">Créer une vidéo</Link>
+            </>
+          )}
+        </div>
+      ) : (
+        <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {shown.map((g) => (
+            <div key={g.id} className="card flex flex-col p-5 transition-colors hover:border-brand/50">
+              <div className="flex items-center justify-between">
+                <StatusBadge status={g.status} />
+                <span className="text-xs text-muted">{new Date(g.createdAt).toLocaleDateString("fr-FR")}</span>
+              </div>
+              <Link href={`/generations/${g.id}`} className="mt-3 line-clamp-3 flex-1 text-sm font-medium leading-relaxed hover:text-brand">
+                {g.prompt}
+              </Link>
+              <p className="mt-3 text-xs text-muted">
+                {MODE_LABEL[g.mode] || g.mode} · {g.format} · {g.durationSeconds} s
+              </p>
+              <div className="mt-4 flex items-center justify-between border-t border-line pt-3">
+                <Link href={`/generations/${g.id}`} className="text-sm font-semibold text-brand hover:underline">Ouvrir</Link>
+                <button onClick={() => remove(g.id)} className="text-sm text-muted hover:text-bad">Supprimer</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
