@@ -1,22 +1,16 @@
-FROM node:20-alpine AS deps
+# API + worker de génération (un seul service). Créer un 2e service Render avec ce fichier.
+FROM node:20-bookworm-slim
+# openssl : requis par Prisma ; python3/make/g++ : au cas où argon2 doive se compiler
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssl ca-certificates python3 make g++ \
+ && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY package.json package-lock.json* ./
-COPY apps/api/package.json ./apps/api/
-COPY packages/video-provider/package.json ./packages/video-provider/
-COPY prisma ./prisma
-RUN npm install
-
-FROM node:20-alpine AS builder
-WORKDIR /app
-COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+RUN npm install --include=dev
 RUN npx prisma generate
-WORKDIR /app/apps/api
-RUN npx tsc || true
-
-FROM node:20-alpine AS runner
-WORKDIR /app
+# build:api compile d'abord le module video-provider, puis l'API (et échoue si erreur)
+RUN npm run build:api
 ENV NODE_ENV=production
-COPY --from=builder /app /app
-EXPOSE 3001
-CMD ["npm", "run", "start:api"]
+EXPOSE 10000
+# Applique les migrations SQL (colonne "mode" incluse) puis démarre l'API
+CMD ["sh", "-c", "npx prisma migrate deploy && npm run start:api"]
