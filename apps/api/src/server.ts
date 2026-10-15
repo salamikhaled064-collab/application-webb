@@ -15,6 +15,7 @@ import uploadRoutes from "./routes/uploads";
 import generationRoutes from "./routes/generations";
 import creditsRoutes from "./routes/credits";
 import adminRoutes from "./routes/admin";
+import publicRoutes from "./routes/public";
 
 storage.ensureStorageDirs();
 
@@ -101,6 +102,7 @@ app.use("/api/uploads", uploadRoutes);
 app.use("/api/generations", generationRoutes);
 app.use("/api/credits", creditsRoutes);
 app.use("/api/admin", adminRoutes);
+app.use("/api/public", publicRoutes);
 
 // Route API inconnue → JSON propre (et non une page HTML)
 app.use("/api", (_req, res) => {

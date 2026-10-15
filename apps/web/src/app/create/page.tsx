@@ -20,10 +20,11 @@ const FORMATS = [
   { id: "9:16", label: "Vertical", hint: "TikTok, Reels, Shorts" },
   { id: "16:9", label: "Horizontal", hint: "YouTube, TV" },
   { id: "1:1", label: "Carré", hint: "Feed Instagram" },
-  { id: "4:5", label: "Portrait", hint: "Feed Instagram, Facebook" },
+  { id: "3:4", label: "Portrait", hint: "Feed Instagram, Facebook" },
 ] as const;
-const DURATIONS = [3, 5, 10, 18] as const;
-const COSTS: Record<number, number> = { 3: 1, 5: 2, 10: 4, 18: 7 };
+// Agnes Video 2.5 : clips de 4 à 12 secondes
+const DURATIONS = [4, 6, 8, 10, 12] as const;
+const COSTS: Record<number, number> = { 4: 1, 6: 2, 8: 3, 10: 4, 12: 5 };
 const CAMERAS = ["Léger zoom avant", "Panoramique lent", "Caméra fixe", "Mouvement dynamique", "Orbital"];
 
 const EXAMPLES: Record<Mode, string> = {
@@ -44,7 +45,8 @@ export default function CreatePage() {
   const [prompt, setPrompt] = useState("");
   const [format, setFormat] = useState<string>("9:16");
   const [style, setStyle] = useState("realistic");
-  const [duration, setDuration] = useState<number>(5);
+  const [duration, setDuration] = useState<number>(6);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [camera, setCamera] = useState(CAMERAS[0]);
 
   const [imageId, setImageId] = useState<string | null>(null);
@@ -58,8 +60,11 @@ export default function CreatePage() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    apiFetch<{ user: { credits: number } }>("/api/auth/me")
-      .then((d) => setCredits(d.user.credits))
+    apiFetch<{ user: { credits: number; role?: string } }>("/api/auth/me")
+      .then((d) => {
+        setCredits(d.user.credits);
+        setIsAdmin(d.user.role === "admin");
+      })
       .catch((e: any) => {
         if (e?.status === 401) router.push("/login");
       });
@@ -126,7 +131,7 @@ export default function CreatePage() {
         return setError(msg);
       }
     }
-    const cost = COSTS[duration];
+    const cost = isAdmin ? 0 : COSTS[duration] ?? 2;
     if (credits !== null && credits < cost) {
       return setError(`Il vous manque ${cost - credits} crédit(s) pour cette vidéo. Choisissez une durée plus courte.`);
     }
@@ -153,7 +158,7 @@ export default function CreatePage() {
     }
   }
 
-  const cost = COSTS[duration];
+  const cost = isAdmin ? 0 : COSTS[duration] ?? 2;
   const notEnough = credits !== null && credits < cost;
 
   return (
@@ -305,13 +310,33 @@ export default function CreatePage() {
 
             <div>
               <h2 className="text-xl font-bold">Durée</h2>
-              <div className="mt-4 flex flex-wrap gap-2">
-                {DURATIONS.map((d) => (
-                  <button key={d} type="button" className="chip !px-4 !py-2.5" aria-pressed={duration === d} onClick={() => setDuration(d)}>
-                    {d} s <span className="ml-2 text-xs opacity-70">{COSTS[d]} crédit{COSTS[d] > 1 ? "s" : ""}</span>
-                  </button>
-                ))}
-              </div>
+              {isAdmin ? (
+                <div className="mt-4 rounded-2xl border border-accent/60 bg-accent/15 p-4">
+                  <div className="flex items-center justify-between">
+                    <label htmlFor="adm-dur" className="text-sm font-semibold">Durée libre (administrateur)</label>
+                    <span className="font-display text-2xl font-bold tabular-nums">{duration} s</span>
+                  </div>
+                  <input
+                    id="adm-dur"
+                    type="range"
+                    min={4}
+                    max={12}
+                    step={1}
+                    value={duration}
+                    onChange={(e) => setDuration(parseInt(e.target.value, 10))}
+                    className="mt-3 w-full accent-[rgb(var(--brand))]"
+                  />
+                  <p className="hint">Gratuit pour les admins. Le modèle vidéo génère des clips de 4 à 12 secondes maximum.</p>
+                </div>
+              ) : (
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {DURATIONS.map((d) => (
+                    <button key={d} type="button" className="chip !px-4 !py-2.5" aria-pressed={duration === d} onClick={() => setDuration(d)}>
+                      {d} s <span className="ml-2 text-xs opacity-70">{COSTS[d]} crédit{COSTS[d] > 1 ? "s" : ""}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
 
             <div>
@@ -370,7 +395,7 @@ export default function CreatePage() {
                 <p className="text-sm text-muted">Coût de cette vidéo</p>
                 {credits !== null && <p className={`text-xs ${notEnough ? "text-bad" : "text-muted"}`}>Votre solde : {credits} crédit{credits > 1 ? "s" : ""}</p>}
               </div>
-              <p className="font-display text-2xl font-bold">{cost} crédit{cost > 1 ? "s" : ""}</p>
+              <p className="font-display text-2xl font-bold">{isAdmin ? "Gratuit" : `${cost} crédit${cost > 1 ? "s" : ""}`}</p>
             </div>
           </div>
         )}

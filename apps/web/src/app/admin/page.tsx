@@ -29,11 +29,14 @@ export default function AdminPage() {
   const [newKey, setNewKey] = useState("");
   const [notice, setNotice] = useState<{ tone: "success" | "error"; text: string } | null>(null);
   const [grant, setGrant] = useState<Record<string, string>>({});
+  const [adm, setAdm] = useState({ email: "", name: "", password: "" });
+  const [meId, setMeId] = useState("");
 
   const loadAll = useCallback(async () => {
     try {
-      const me = await apiFetch<{ user: { role: string } }>("/api/auth/me");
+      const me = await apiFetch<{ user: { role: string; id?: string } }>("/api/auth/me");
       if (me.user?.role !== "admin") return setState("forbidden");
+      setMeId(me.user.id || "");
       const [s, k, u, g] = await Promise.all([
         apiFetch("/api/admin/stats"),
         apiFetch("/api/admin/api-keys"),
@@ -125,7 +128,27 @@ export default function AdminPage() {
       {notice && <div className="mt-5"><Alert tone={notice.tone}>{notice.text}</Alert></div>}
 
       {tab === "overview" && stats && (
-        <div className="mt-6 grid grid-cols-2 gap-4 lg:grid-cols-3">
+        <div className="mt-6 space-y-4">
+          {stats.provider === "mock" ? (
+            <Alert tone="warn">
+              <strong>Mode démonstration actif.</strong> Les vidéos générées sont un exemple fixe (l&apos;image et le texte ne sont pas utilisés). Pour de vraies vidéos : ajoutez une clé Agnes dans l&apos;onglet « Clés API », puis mettez <code className="rounded bg-sunken px-1">VIDEO_PROVIDER=agnes</code> sur le service API.
+            </Alert>
+          ) : (
+            <>
+              <Alert tone="success">
+                Fournisseur réel actif : <strong>{stats.model}</strong>. Clips de 4 à 12 secondes.
+              </Alert>
+              {!stats.publicUrlConfigured && (
+                <Alert>
+                  <code className="rounded bg-sunken px-1">PUBLIC_BASE_URL</code> est absente : le mode « image → vidéo » ne fonctionnera pas. Ajoutez l&apos;adresse publique de l&apos;API sur le service API.
+                </Alert>
+              )}
+              {stats.activeKeys === 0 && (
+                <Alert>Aucune clé API active : ajoutez-en une dans l&apos;onglet « Clés API ».</Alert>
+              )}
+            </>
+          )}
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-3">
           {[
             ["Utilisateurs", stats.users],
             ["Générations", stats.generations],
@@ -139,6 +162,7 @@ export default function AdminPage() {
               <p className="mt-2 font-display text-4xl font-bold tabular-nums">{v as number}</p>
             </div>
           ))}
+        </div>
         </div>
       )}
 
@@ -196,7 +220,24 @@ export default function AdminPage() {
       )}
 
       {tab === "users" && (
-        <div className="card mt-6 overflow-x-auto">
+        <div className="mt-6 space-y-5">
+        <div className="card p-5">
+          <h2 className="text-lg font-bold">Créer un administrateur</h2>
+          <p className="hint !mt-1">Crée un nouveau compte avec les droits admin. Pour un compte existant, utilisez « Promouvoir » dans le tableau.</p>
+          <div className="mt-4 grid gap-3 sm:grid-cols-3">
+            <input className="input" type="email" placeholder="E-mail" autoComplete="off" value={adm.email} onChange={(e) => setAdm({ ...adm, email: e.target.value })} aria-label="E-mail du nouvel admin" />
+            <input className="input" type="text" placeholder="Nom (facultatif)" value={adm.name} onChange={(e) => setAdm({ ...adm, name: e.target.value })} aria-label="Nom du nouvel admin" />
+            <input className="input" type="password" placeholder="Mot de passe (10+ caractères)" autoComplete="new-password" value={adm.password} onChange={(e) => setAdm({ ...adm, password: e.target.value })} aria-label="Mot de passe du nouvel admin" />
+          </div>
+          <button
+            className="btn-primary mt-3"
+            disabled={!adm.email.includes("@") || adm.password.length < 10}
+            onClick={() => run(async () => { await apiFetch("/api/admin/admins", { method: "POST", body: JSON.stringify({ email: adm.email, name: adm.name || undefined, password: adm.password }) }); setAdm({ email: "", name: "", password: "" }); }, "Administrateur créé.")}
+          >
+            Créer l&apos;administrateur
+          </button>
+        </div>
+        <div className="card overflow-x-auto">
           <table className="w-full text-left text-sm">
             <thead className="border-b border-line text-muted">
               <tr>
@@ -214,7 +255,18 @@ export default function AdminPage() {
                       <p className="font-medium">{u.email}</p>
                       {u.name && <p className="text-xs text-muted">{u.name}</p>}
                     </td>
-                    <td className="p-3.5">{u.role === "admin" ? <span className="rounded-full bg-accent/40 px-2.5 py-0.5 text-xs font-semibold">Admin</span> : "Utilisateur"}</td>
+                    <td className="p-3.5">
+                      <div className="flex flex-col items-start gap-1.5">
+                        {u.role === "admin" ? <span className="rounded-full bg-accent/40 px-2.5 py-0.5 text-xs font-semibold">Admin</span> : <span>Utilisateur</span>}
+                        {u.id !== meId && (
+                          u.role === "admin" ? (
+                            <button className="text-xs font-semibold text-bad hover:underline" onClick={() => { if (confirm(`Retirer les droits admin à ${u.email} ?`)) run(() => apiFetch(`/api/admin/users/${u.id}/role`, { method: "PATCH", body: JSON.stringify({ role: "user" }) }), "Droits admin retirés."); }}>Retirer admin</button>
+                          ) : (
+                            <button className="text-xs font-semibold text-brand hover:underline" onClick={() => { if (confirm(`Donner les droits admin à ${u.email} ?`)) run(() => apiFetch(`/api/admin/users/${u.id}/role`, { method: "PATCH", body: JSON.stringify({ role: "admin" }) }), "Utilisateur promu administrateur."); }}>Promouvoir admin</button>
+                          )
+                        )}
+                      </div>
+                    </td>
                     <td className="p-3.5 font-semibold tabular-nums">{u.credits}</td>
                     <td className="whitespace-nowrap p-3.5 text-xs">{fmt(u.createdAt)}</td>
                     <td className="p-3.5">
@@ -242,6 +294,7 @@ export default function AdminPage() {
               })}
             </tbody>
           </table>
+        </div>
         </div>
       )}
 

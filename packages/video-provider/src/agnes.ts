@@ -20,20 +20,35 @@ export interface AgnesConfig {
   imageMode: "base64" | "public_url" | "multipart";
 }
 
-function buildCreatePayload(request: VideoGenerationRequest) {
+/**
+ * Corps de la requête POST /v1/videos pour Agnes Video 2.5 (doc officielle) :
+ *  - mode "text"     : texte → vidéo
+ *  - mode "keyframe" : la vidéo PART de l'image (first_frame = URL publique)
+ * `seconds` est une CHAÎNE "4".."12". Flash n'accepte que size "720P".
+ */
+export function buildCreatePayload(request: VideoGenerationRequest) {
+  const seconds = Math.min(12, Math.max(4, Math.round(request.seconds ?? request.durationSeconds ?? 5)));
   const payload: Record<string, unknown> = {
     model: request.model,
     prompt: request.prompt,
-    width: request.width,
-    height: request.height,
-    num_frames: request.numFrames,
-    frame_rate: request.frameRate,
+    seconds: String(seconds),
+    mode: request.imageUrl ? "keyframe" : "text",
+    aspect_ratio: request.aspectRatio || "16:9",
+    n: 1,
   };
-  // Only include image when present – never send "" for PROMPT_ONLY
-  if (request.image && request.image.length > 0) {
-    payload.image = request.image;
+  if (/flash/i.test(request.model)) payload.size = "720P";
+  // Jamais de chaîne vide pour le texte seul
+  if (request.imageUrl && request.imageUrl.length > 0) {
+    payload.first_frame = request.imageUrl;
   }
   return payload;
+}
+
+function errorText(json: any, bodyText: string, status: number): string {
+  const d = json?.detail ?? json?.error?.message ?? json?.error ?? json?.message;
+  if (typeof d === "string" && d) return d;
+  if (d && typeof d === "object") return JSON.stringify(d).slice(0, 300);
+  return (bodyText || `HTTP ${status}`).slice(0, 300);
 }
 
 async function httpJson(
@@ -102,11 +117,7 @@ export class AgnesVideoProvider implements VideoProvider {
     });
 
     if (!res.ok) {
-      const message =
-        json?.error?.message ||
-        json?.message ||
-        bodyText ||
-        `HTTP ${res.status}`;
+      const message = errorText(json, bodyText, res.status);
 
       if (res.status === 429) {
         return {
@@ -116,22 +127,25 @@ export class AgnesVideoProvider implements VideoProvider {
           raw: json,
         };
       }
+      if (res.status === 401 || res.status === 403) {
+        return {
+          providerJobId: "",
+          status: "failed",
+          errorMessage: `Clé Agnes refusée (${res.status}). Vérifiez la clé dans /admin. ${message}`,
+          raw: json,
+        };
+      }
 
       return {
         providerJobId: "",
         status: "failed",
-        errorMessage: `Erreur Agnes: ${message}`,
+        errorMessage: `Erreur Agnes (${res.status}) : ${message}`,
         raw: json,
       };
     }
 
-    // Format de réponse attendu (peut nécessiter adaptation selon la doc réelle)
-    const jobId =
-      json?.id ||
-      json?.job_id ||
-      json?.video_id ||
-      json?.data?.id ||
-      null;
+    // La doc : "video_id" sert à récupérer le résultat ; "id"/"task_id" identifient la tâche.
+    const jobId = json?.video_id || json?.id || json?.task_id || json?.data?.video_id || null;
 
     if (!jobId) {
       return {
@@ -155,7 +169,10 @@ export class AgnesVideoProvider implements VideoProvider {
     apiKey: string,
     signal?: AbortSignal
   ): Promise<VideoGenerationResult> {
-    const url = `${this.config.baseUrl}${this.config.resultPath}/${providerJobId}`;
+    // GET /agnesapi?video_id=...&model_name=...  (model_name est obligatoire hors mode texte)
+    const url =
+      `${this.config.baseUrl}${this.config.resultPath}` +
+      `?video_id=${encodeURIComponent(providerJobId)}&model_name=${encodeURIComponent(this.config.model)}`;
 
     const { res, bodyText, json } = await httpJson(url, {
       method: "GET",
@@ -176,6 +193,16 @@ export class AgnesVideoProvider implements VideoProvider {
         };
       }
 
+      if (res.status === 401 || res.status === 403) {
+        return {
+          providerJobId,
+          status: "failed",
+          errorMessage: `Clé Agnes refusée (${res.status}) pendant le suivi.`,
+          raw: json,
+        };
+      }
+
+      // 429 / 5xx : passager, on continue d'interroger
       return {
         providerJobId,
         status: "processing",
@@ -193,11 +220,11 @@ export class AgnesVideoProvider implements VideoProvider {
     ).toLowerCase();
 
     let status: VideoGenerationResult["status"] = "processing";
-    if (["completed", "success", "done", "finished"].includes(statusRaw)) {
+    if (["completed", "success", "succeeded", "done", "finished"].includes(statusRaw)) {
       status = "completed";
-    } else if (["failed", "error", "cancelled"].includes(statusRaw)) {
+    } else if (["failed", "error", "cancelled", "canceled"].includes(statusRaw)) {
       status = "failed";
-    } else if (["queued", "pending", "waiting"].includes(statusRaw)) {
+    } else if (["queued", "pending", "waiting", "submitted"].includes(statusRaw)) {
       status = "queued";
     }
 
@@ -221,7 +248,13 @@ export class AgnesVideoProvider implements VideoProvider {
       status,
       progress,
       videoUrl,
-      errorMessage: status === "failed" ? json?.error || json?.message : undefined,
+      errorMessage:
+        status === "failed"
+          ? (typeof json?.error === "string" ? json.error : json?.error?.message) ||
+            json?.message ||
+            json?.detail ||
+            "Génération échouée chez le fournisseur"
+          : undefined,
       raw: json,
     };
   }

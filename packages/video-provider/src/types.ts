@@ -12,12 +12,18 @@ export type GenerationStatus =
 export interface VideoGenerationRequest {
   model: string;
   prompt: string;
-  /** Optional – omit entirely for PROMPT_ONLY (never send empty string) */
+  /** Ancien format (base64) – conservé pour compatibilité, non utilisé par Video 2.5 */
   image?: string;
-  width: number;
-  height: number;
-  numFrames: number;
-  frameRate: number;
+  /** URL PUBLIQUE de l'image de départ (Agnes doit pouvoir la télécharger). Absente pour PROMPT_ONLY. */
+  imageUrl?: string;
+  /** Format de sortie : "9:16" | "16:9" | "1:1" | "3:4" | "4:3" | "21:9" */
+  aspectRatio?: string;
+  /** Durée du clip en secondes (Agnes Video 2.5 : 4 à 12) */
+  seconds?: number;
+  width?: number;
+  height?: number;
+  numFrames?: number;
+  frameRate?: number;
   style?: string;
   durationSeconds?: number;
   mode?: "PROMPT_ONLY" | "IMAGE_TO_VIDEO";
@@ -61,18 +67,24 @@ export interface VideoDuration {
   numFrames: number;
 }
 
+/** Formats réellement acceptés par Agnes Video 2.5 Flash (720P) */
 export const VIDEO_PRESETS: Record<string, VideoPreset> = {
-  "9:16": { width: 704, height: 1280 },
+  "9:16": { width: 720, height: 1280 },
   "16:9": { width: 1280, height: 704 },
-  "1:1": { width: 1024, height: 1024 },
-  "4:5": { width: 864, height: 1080 },
+  "1:1": { width: 720, height: 720 },
+  "3:4": { width: 720, height: 960 },
 };
 
+/** Agnes Video 2.5 : de 4 à 12 secondes par clip */
+export const MIN_CLIP_SECONDS = 4;
+export const MAX_CLIP_SECONDS = 12;
+
 export const VIDEO_DURATIONS: Record<string, VideoDuration> = {
-  "3": { seconds: 3, numFrames: 81 },
-  "5": { seconds: 5, numFrames: 121 },
+  "4": { seconds: 4, numFrames: 97 },
+  "6": { seconds: 6, numFrames: 145 },
+  "8": { seconds: 8, numFrames: 193 },
   "10": { seconds: 10, numFrames: 241 },
-  "18": { seconds: 18, numFrames: 441 },
+  "12": { seconds: 12, numFrames: 289 },
 };
 
 export const VIDEO_STYLES = [

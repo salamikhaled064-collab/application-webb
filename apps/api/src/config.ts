@@ -68,13 +68,14 @@ export const config = {
   ),
   videoProvider: (process.env.VIDEO_PROVIDER || "mock") as "mock" | "agnes",
   agnes: {
-    model: process.env.AGNES_MODEL || "agnes-video-v2.0",
+    // agnes-video-v2.0 a été RETIRÉ le 25/09/2026 → Video 2.5 Flash (720P, 4 à 12 s)
+    model: process.env.AGNES_MODEL || "agnes-video-2.5-flash",
     baseUrl: process.env.AGNES_BASE_URL || "https://apihub.agnes-ai.com",
     createPath: process.env.AGNES_CREATE_PATH || "/v1/videos",
     resultPath: process.env.AGNES_RESULT_PATH || "/agnesapi",
     frameRate: parseInt(process.env.AGNES_FRAME_RATE || "24", 10),
-    pollIntervalMs: parseInt(process.env.AGNES_POLL_INTERVAL_MS || "4000", 10),
-    pollMaxAttempts: parseInt(process.env.AGNES_POLL_MAX_ATTEMPTS || "150", 10),
+    pollIntervalMs: parseInt(process.env.AGNES_POLL_INTERVAL_MS || "3000", 10),
+    pollMaxAttempts: parseInt(process.env.AGNES_POLL_MAX_ATTEMPTS || "200", 10),
     requestTimeoutMs: parseInt(process.env.AGNES_REQUEST_TIMEOUT_MS || "60000", 10),
     resultTimeoutMs: parseInt(process.env.AGNES_RESULT_TIMEOUT_MS || "30000", 10),
   },
@@ -85,11 +86,17 @@ export const config = {
   videoRetentionDays: parseInt(process.env.VIDEO_RETENTION_DAYS || "7", 10),
   defaultUserCredits: parseInt(process.env.DEFAULT_USER_CREDITS || "5", 10),
   creditCosts: {
-    3: parseInt(process.env.CREDITS_COST_3_SECONDS || "1", 10),
-    5: parseInt(process.env.CREDITS_COST_5_SECONDS || "2", 10),
+    4: parseInt(process.env.CREDITS_COST_4_SECONDS || "1", 10),
+    6: parseInt(process.env.CREDITS_COST_6_SECONDS || "2", 10),
+    8: parseInt(process.env.CREDITS_COST_8_SECONDS || "3", 10),
     10: parseInt(process.env.CREDITS_COST_10_SECONDS || "4", 10),
-    18: parseInt(process.env.CREDITS_COST_18_SECONDS || "7", 10),
+    12: parseInt(process.env.CREDITS_COST_12_SECONDS || "5", 10),
   } as Record<number, number>,
+  /**
+   * Adresse PUBLIQUE de cette API : Agnes y télécharge l'image de départ (URL signée).
+   * Sur Render elle est fournie automatiquement (RENDER_EXTERNAL_URL).
+   */
+  publicBaseUrl: normalizeOrigin(process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || ""),
   sessionMaxAgeMs: 7 * 24 * 60 * 60 * 1000,
   queue: {
     name: process.env.GENERATION_QUEUE_NAME || "video-generation",
@@ -103,19 +110,20 @@ export const config = {
 };
 
 export const VIDEO_PRESETS: Record<string, { width: number; height: number }> = {
-  "9:16": { width: 704, height: 1280 },
+  "9:16": { width: 720, height: 1280 },
   "16:9": { width: 1280, height: 704 },
-  "1:1": { width: 1024, height: 1024 },
-  "4:5": { width: 864, height: 1080 },
+  "1:1": { width: 720, height: 720 },
+  "3:4": { width: 720, height: 960 },
 };
 
-export const VIDEO_DURATIONS: Record<number, { seconds: number; numFrames: number }> = {
-  3: { seconds: 3, numFrames: 81 },
-  5: { seconds: 5, numFrames: 121 },
-  10: { seconds: 10, numFrames: 241 },
-  18: { seconds: 18, numFrames: 441 },
-};
+/** Agnes Video 2.5 : un clip dure de 4 à 12 secondes. */
+export const MIN_CLIP_SECONDS = 4;
+export const MAX_CLIP_SECONDS = 12;
+export const USER_DURATIONS = [4, 6, 8, 10, 12];
 
+export function numFramesFor(seconds: number): number {
+  return Math.round(seconds * 24) + 1;
+}
 
 // Fail fast if S3 is required but misconfigured
 if (config.storageProvider === "s3") {

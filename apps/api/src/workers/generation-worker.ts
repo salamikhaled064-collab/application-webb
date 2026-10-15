@@ -6,6 +6,7 @@
 import { config, safeLog } from "../config";
 import { prisma } from "../lib/prisma";
 import * as creditService from "../services/credit-service";
+import { buildSignedUploadUrl } from "../lib/signed-url";
 import * as storage from "../services/storage-service";
 import {
   setJobHandler,
@@ -95,19 +96,16 @@ export async function processGeneration(data: { generationId: string }) {
       }
     }
 
-    let imageDataUrl = "";
-    if (gen.upload) {
-      try {
-        imageDataUrl = await storage.readFileAsBase64DataUrlAsync(
-          gen.upload.storageKey,
-          gen.upload.mimeType
-        );
-      } catch {
-        imageDataUrl = storage.readFileAsBase64DataUrl(
-          gen.upload.storageKey,
-          gen.upload.mimeType
+    // Agnes Video 2.5 télécharge l'image depuis une URL PUBLIQUE (signée, temporaire).
+    let imageUrl: string | undefined;
+    if (config.videoProvider === "agnes" && gen.upload) {
+      const signed = buildSignedUploadUrl(gen.upload.id);
+      if (!signed) {
+        throw new Error(
+          "PUBLIC_BASE_URL manquante : Agnes ne peut pas lire l'image. Ajoutez PUBLIC_BASE_URL (adresse publique de l'API) sur le service API."
         );
       }
+      imageUrl = signed;
     }
 
     let created;
@@ -116,7 +114,9 @@ export async function processGeneration(data: { generationId: string }) {
         {
           model: config.agnes.model,
           prompt: gen.finalPrompt || gen.prompt,
-          image: imageDataUrl || undefined,
+          imageUrl,
+          aspectRatio: gen.format,
+          seconds: gen.durationSeconds,
           width: gen.width,
           height: gen.height,
           numFrames: gen.numFrames,
@@ -124,6 +124,11 @@ export async function processGeneration(data: { generationId: string }) {
         },
         apiKey
       );
+      // Création refusée (clé invalide, 400, 429…) : on échoue TOUT DE SUITE avec le vrai message,
+      // au lieu d'interroger pendant 10 minutes un identifiant vide.
+      if (created.status === "failed" || !created.providerJobId) {
+        throw new Error(created.errorMessage || "Création refusée par le fournisseur vidéo");
+      }
     } catch (err: any) {
       const msg = err.message || "";
       if (/429|rate limit|timeout|ECONNRESET|5\d\d|network|abort/i.test(msg)) {

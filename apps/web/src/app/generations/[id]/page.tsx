@@ -10,6 +10,7 @@ const FINAL = ["completed", "failed", "cancelled"];
 const MAX_W: Record<string, string> = {
   "9:16": "max-w-[320px]",
   "4:5": "max-w-[420px]",
+  "3:4": "max-w-[380px]",
   "1:1": "max-w-[520px]",
   "16:9": "max-w-full",
 };
@@ -141,6 +142,11 @@ export default function GenerationDetailPage() {
         </div>
 
         <aside className="space-y-4">
+          {gen.provider === "mock" && gen.status === "completed" && (
+            <Alert tone="warn">
+              <strong>Mode démonstration.</strong> Cette vidéo est un exemple : votre image, votre description et la durée choisie n&apos;ont pas été utilisées. De vraies vidéos nécessitent une clé Agnes (page Admin).
+            </Alert>
+          )}
           {gen.status === "failed" && (
             <Alert>
               {gen.errorMessage || "La génération a échoué."}

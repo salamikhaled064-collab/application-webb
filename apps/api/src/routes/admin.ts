@@ -4,6 +4,8 @@ import { requireAuth, requireAdmin } from "../middleware/auth";
 import { prisma } from "../lib/prisma";
 import { encrypt, maskKey } from "../lib/crypto";
 import { ah, HttpError } from "../lib/async-handler";
+import argon2 from "argon2";
+import { config } from "../config";
 
 const router = Router();
 
@@ -28,7 +30,18 @@ router.get(
       prisma.videoGeneration.count({ where: { status: { in: ["pending", "queued", "processing"] } } }),
       prisma.apiKey.count({ where: { status: "active" } }),
     ]);
-    res.json({ users, generations, completed, failed, processing, activeKeys: keys });
+    res.json({
+      users,
+      generations,
+      completed,
+      failed,
+      processing,
+      activeKeys: keys,
+      // État du fournisseur vidéo : l'admin voit tout de suite si c'est le mode démo
+      provider: config.videoProvider,
+      model: config.videoProvider === "agnes" ? config.agnes.model : "démo",
+      publicUrlConfigured: Boolean(config.publicBaseUrl),
+    });
   })
 );
 
@@ -50,6 +63,57 @@ router.get(
       take: 200,
     });
     res.json({ users });
+  })
+);
+
+const roleSchema = z.object({ role: z.enum(["admin", "user"]) });
+
+// Promouvoir un utilisateur en admin, ou lui retirer ce rôle
+router.patch(
+  "/users/:id/role",
+  ah(async (req, res) => {
+    const { role } = roleSchema.parse(req.body);
+    if (req.params.id === req.user!.id) {
+      throw new HttpError(400, "Vous ne pouvez pas modifier votre propre rôle.");
+    }
+    const target = await prisma.user.findUnique({ where: { id: req.params.id } });
+    if (!target) throw new HttpError(404, "Utilisateur introuvable");
+    if (target.role === "admin" && role === "user") {
+      const admins = await prisma.user.count({ where: { role: "admin" } });
+      if (admins <= 1) throw new HttpError(400, "Impossible : il doit rester au moins un administrateur.");
+    }
+    const updated = await prisma.user.update({ where: { id: target.id }, data: { role } });
+    await audit(req.user!.id, `user.role.${role}`, "User", updated.id);
+    res.json({ id: updated.id, role: updated.role });
+  })
+);
+
+const newAdminSchema = z.object({
+  email: z.string().trim().toLowerCase().email("E-mail invalide"),
+  name: z.string().trim().max(80).optional(),
+  password: z.string().min(10, "Mot de passe : 10 caractères minimum").max(200),
+});
+
+// Créer directement un compte administrateur
+router.post(
+  "/admins",
+  ah(async (req, res) => {
+    const body = newAdminSchema.parse(req.body);
+    const exists = await prisma.user.findUnique({ where: { email: body.email } });
+    if (exists) {
+      throw new HttpError(409, "Ce compte existe déjà : utilisez « Promouvoir » dans la liste des utilisateurs.");
+    }
+    const user = await prisma.user.create({
+      data: {
+        email: body.email,
+        name: body.name || null,
+        passwordHash: await argon2.hash(body.password, { type: argon2.argon2id }),
+        role: "admin",
+        credits: config.defaultUserCredits,
+      },
+    });
+    await audit(req.user!.id, "admin.create", "User", user.id);
+    res.status(201).json({ id: user.id, email: user.email, role: user.role });
   })
 );
 

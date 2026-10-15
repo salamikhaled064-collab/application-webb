@@ -1,11 +1,10 @@
 import { prisma } from "../lib/prisma";
-import { config, VIDEO_PRESETS, VIDEO_DURATIONS } from "../config";
+import { config, VIDEO_PRESETS, USER_DURATIONS, MIN_CLIP_SECONDS, MAX_CLIP_SECONDS, numFramesFor } from "../config";
 import * as creditService from "./credit-service";
 import { enqueueGeneration } from "../queues/generation-queue";
 
 const ALLOWED_FORMATS = new Set(Object.keys(VIDEO_PRESETS));
 const ALLOWED_STYLES = new Set(["none", "cinematic", "realistic", "artistic", "dynamic", "anime"]);
-const ALLOWED_DURATIONS = new Set([3, 5, 10, 18]);
 const ALLOWED_MODES = new Set(["PROMPT_ONLY", "IMAGE_TO_VIDEO"]);
 
 export interface CreateGenerationInput {
@@ -16,6 +15,8 @@ export interface CreateGenerationInput {
   format: string;
   style: string;
   durationSeconds: number;
+  /** Administrateur : durée libre (4 à 12 s) et génération gratuite */
+  isAdmin?: boolean;
   cameraMovement?: string;
   mood?: string;
 }
@@ -39,7 +40,20 @@ export async function createGeneration(input: CreateGenerationInput) {
   if (!ALLOWED_STYLES.has(style)) {
     throw Object.assign(new Error("Style non supporté"), { status: 400 });
   }
-  if (!ALLOWED_DURATIONS.has(durationSeconds)) {
+  if (input.isAdmin) {
+    if (
+      !Number.isInteger(durationSeconds) ||
+      durationSeconds < MIN_CLIP_SECONDS ||
+      durationSeconds > MAX_CLIP_SECONDS
+    ) {
+      throw Object.assign(
+        new Error(
+          `Durée non supportée : le modèle vidéo génère des clips de ${MIN_CLIP_SECONDS} à ${MAX_CLIP_SECONDS} secondes.`
+        ),
+        { status: 400 }
+      );
+    }
+  } else if (!USER_DURATIONS.includes(durationSeconds)) {
     throw Object.assign(new Error("Durée non supportée"), { status: 400 });
   }
 
@@ -58,13 +72,13 @@ export async function createGeneration(input: CreateGenerationInput) {
   }
 
   const preset = VIDEO_PRESETS[format];
-  const duration = VIDEO_DURATIONS[durationSeconds];
-  const cost = creditService.getCost(durationSeconds);
+  // Les administrateurs ne paient pas de crédits
+  const cost = input.isAdmin ? 0 : creditService.getCost(durationSeconds);
 
   // Vérification AVANT de créer la ligne : évite de polluer l'historique avec des échecs "Crédits insuffisants"
   const owner = await prisma.user.findUnique({ where: { id: userId }, select: { credits: true } });
   if (!owner) throw Object.assign(new Error("Utilisateur introuvable"), { status: 404 });
-  if (owner.credits < cost) {
+  if (cost > 0 && owner.credits < cost) {
     throw Object.assign(
       new Error(`Crédits insuffisants : cette vidéo coûte ${cost} crédits, il vous en reste ${owner.credits}.`),
       { status: 402 }
@@ -85,7 +99,7 @@ export async function createGeneration(input: CreateGenerationInput) {
       durationSeconds,
       width: preset.width,
       height: preset.height,
-      numFrames: duration.numFrames,
+      numFrames: numFramesFor(durationSeconds),
       frameRate: config.agnes.frameRate,
       provider: config.videoProvider,
       status: "pending",
@@ -95,7 +109,7 @@ export async function createGeneration(input: CreateGenerationInput) {
   });
 
   try {
-    await creditService.reserveCredits(userId, cost, generation.id);
+    if (cost > 0) await creditService.reserveCredits(userId, cost, generation.id);
   } catch (err) {
     await prisma.videoGeneration.update({
       where: { id: generation.id },
@@ -188,6 +202,7 @@ function sanitizeGeneration(gen: any) {
     prompt: gen.prompt,
     style: gen.style,
     format: gen.format,
+    provider: gen.provider,
     durationSeconds: gen.durationSeconds,
     status: gen.status,
     progress: gen.progress,

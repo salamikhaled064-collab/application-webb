@@ -13,9 +13,9 @@ const createSchema = z
     mode: z.enum(["PROMPT_ONLY", "IMAGE_TO_VIDEO"]).optional(),
     imageId: z.string().min(1).max(64).optional(),
     prompt: z.string().min(10).max(1500),
-    format: z.enum(["9:16", "16:9", "1:1", "4:5"]),
+    format: z.enum(["9:16", "16:9", "1:1", "3:4"]),
     style: z.enum(["none", "cinematic", "realistic", "artistic", "dynamic", "anime"]),
-    durationSeconds: z.union([z.literal(3), z.literal(5), z.literal(10), z.literal(18)]),
+    durationSeconds: z.number().int().min(1).max(3600),
     cameraMovement: z.string().max(200).optional(),
     mood: z.string().max(200).optional(),
   })
@@ -42,6 +42,7 @@ router.post("/", requireAuth, async (req, res) => {
       format: body.format,
       style: body.style,
       durationSeconds: body.durationSeconds,
+      isAdmin: req.user!.role === "admin",
       cameraMovement: body.cameraMovement,
       mood: body.mood,
     });
