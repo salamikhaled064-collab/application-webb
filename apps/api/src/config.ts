@@ -103,6 +103,9 @@ export const config = {
     concurrency: parseInt(process.env.GENERATION_CONCURRENCY || "2", 10),
     maxAttempts: parseInt(process.env.GENERATION_MAX_ATTEMPTS || "3", 10),
     backoffMs: parseInt(process.env.GENERATION_BACKOFF_MS || "5000", 10),
+    // Sans Redis : nombre d'essais quand le fournisseur est saturé (503), et délai entre essais
+    memoryRetries: parseInt(process.env.MEMORY_RETRIES || "6", 10),
+    memoryRetryDelayMs: parseInt(process.env.MEMORY_RETRY_DELAY_MS || "20000", 10),
   },
   runWorkerInApi:
     process.env.RUN_WORKER_IN_API === "true" ||

@@ -323,11 +323,26 @@ export async function startWorkerInProcess() {
     await startBullWorker();
   } else {
     setJobHandler(async (data) => {
-      try {
-        await processGeneration(data);
-      } catch (err: any) {
-        // File mémoire : pas de retry BullMQ → on échoue proprement et on rembourse.
-        await failAndRefund(data.generationId, err?.message || "Erreur");
+      // Sans BullMQ il n'y a pas de retry automatique : on le fait ici quand le
+      // fournisseur est momentanément saturé (503 "queue is full"), 429, réseau...
+      const max = Math.max(1, config.queue.memoryRetries);
+      for (let attempt = 1; attempt <= max; attempt++) {
+        try {
+          await processGeneration(data);
+          return;
+        } catch (err: any) {
+          const temporary = err instanceof TemporaryError || err?.name === "TemporaryError";
+          if (!temporary || attempt === max) {
+            await failAndRefund(data.generationId, err?.message || "Erreur");
+            return;
+          }
+          const wait = config.queue.memoryRetryDelayMs * attempt;
+          safeLog("worker", `fournisseur occupé – nouvel essai ${attempt + 1}/${max} dans ${Math.round(wait / 1000)}s`, {
+            generationId: data.generationId,
+            error: err?.message,
+          });
+          await sleep(wait);
+        }
       }
     });
     safeLog("worker", `In-process memory handler ready (provider=${config.videoProvider})`);

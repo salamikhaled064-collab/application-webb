@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { apiFetch, getNetworkErrorMessage, notifyAuthChanged } from "../../lib/api";
-import { Alert, IconCheck, IconImage, IconText, IconUpload, ViewFinder } from "../../components/ui";
+import { Alert, IconCheck, IconImage, IconText, IconUpload, Spinner, ViewFinder } from "../../components/ui";
 
 type Mode = "PROMPT_ONLY" | "IMAGE_TO_VIDEO";
 
@@ -47,6 +47,9 @@ export default function CreatePage() {
   const [style, setStyle] = useState("realistic");
   const [duration, setDuration] = useState<number>(6);
   const [isAdmin, setIsAdmin] = useState(false);
+  // L'assistant n'est affiché QUE pour un utilisateur connecté
+  const [auth, setAuth] = useState<"checking" | "ok" | "error">("checking");
+  const [authError, setAuthError] = useState("");
   const [camera, setCamera] = useState(CAMERAS[0]);
 
   const [imageId, setImageId] = useState<string | null>(null);
@@ -64,9 +67,15 @@ export default function CreatePage() {
       .then((d) => {
         setCredits(d.user.credits);
         setIsAdmin(d.user.role === "admin");
+        setAuth("ok");
       })
       .catch((e: any) => {
-        if (e?.status === 401) router.push("/login");
+        if (e?.status === 401) {
+          router.replace("/login?next=/create");
+          return;
+        }
+        setAuthError(getNetworkErrorMessage(e));
+        setAuth("error");
       });
   }, [router]);
 
@@ -160,6 +169,18 @@ export default function CreatePage() {
 
   const cost = isAdmin ? 0 : COSTS[duration] ?? 2;
   const notEnough = credits !== null && credits < cost;
+
+  if (auth === "checking") {
+    return <div className="flex min-h-[50vh] items-center justify-center"><Spinner /></div>;
+  }
+  if (auth === "error") {
+    return (
+      <div className="mx-auto max-w-md px-4 py-16 text-center">
+        <Alert>{authError}</Alert>
+        <button className="btn-secondary mt-5" onClick={() => window.location.reload()}>Réessayer</button>
+      </div>
+    );
+  }
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-8 sm:py-12">

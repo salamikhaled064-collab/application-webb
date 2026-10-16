@@ -1,10 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { apiFetch, getNetworkErrorMessage, notifyAuthChanged } from "../../lib/api";
 import { Alert } from "../../components/ui";
+import { getNextPath, hasNextParam } from "../../lib/redirect";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -12,6 +13,11 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [needLogin, setNeedLogin] = useState(false);
+
+  useEffect(() => {
+    setNeedLogin(hasNextParam());
+  }, []);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -23,7 +29,7 @@ export default function LoginPage() {
         body: JSON.stringify({ email: email.trim().toLowerCase(), password }),
       });
       notifyAuthChanged();
-      router.push("/create");
+      router.push(getNextPath());
       router.refresh();
     } catch (err) {
       setError(getNetworkErrorMessage(err));
@@ -37,6 +43,12 @@ export default function LoginPage() {
       <div className="card w-full p-7 sm:p-8">
         <h1 className="text-2xl font-bold">Connexion</h1>
         <p className="mt-1 text-sm text-muted">Accédez à votre espace de création.</p>
+
+        {needLogin && (
+          <div className="mt-5">
+            <Alert tone="info">Connectez-vous pour créer des vidéos. Pas encore de compte ? Créez-en un gratuitement.</Alert>
+          </div>
+        )}
 
         <form onSubmit={onSubmit} className="mt-7 space-y-4">
           <div>

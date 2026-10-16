@@ -136,6 +136,16 @@ export class AgnesVideoProvider implements VideoProvider {
         };
       }
 
+      if (res.status === 503 && /queue is full|busy|overload/i.test(message)) {
+        return {
+          providerJobId: "",
+          status: "failed",
+          errorMessage:
+            "Erreur Agnes (503) : les serveurs vidéo d'Agnes sont saturés en ce moment (file d'attente pleine). Réessayez dans quelques minutes.",
+          raw: json,
+        };
+      }
+
       return {
         providerJobId: "",
         status: "failed",

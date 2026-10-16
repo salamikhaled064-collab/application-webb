@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { apiFetch, getNetworkErrorMessage, notifyAuthChanged } from "../../lib/api";
 import { Alert } from "../../components/ui";
+import { getNextPath } from "../../lib/redirect";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -34,7 +35,7 @@ export default function RegisterPage() {
         }),
       });
       notifyAuthChanged();
-      router.push("/create");
+      router.push(getNextPath());
       router.refresh();
     } catch (err) {
       setError(getNetworkErrorMessage(err));
