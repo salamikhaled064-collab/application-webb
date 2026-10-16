@@ -57,7 +57,7 @@ export async function processGeneration(data: { generationId: string }) {
 
   await prisma.videoGeneration.update({
     where: { id: generationId },
-    data: { status: "processing", startedAt: new Date(), progress: 5 },
+    data: { status: "processing", startedAt: new Date(), progress: 5, errorMessage: null },
   });
 
   try {
@@ -74,7 +74,8 @@ export async function processGeneration(data: { generationId: string }) {
       // Prefer encrypted keys from /admin; fallback to AGNES_API_KEY env
       const keyRow = await prisma.apiKey.findFirst({
         where: {
-          status: "active",
+          // "cooldown" doit pouvoir redevenir utilisable une fois la pause écoulée
+          status: { in: ["active", "cooldown"] },
           OR: [{ disabledUntil: null }, { disabledUntil: { lt: new Date() } }],
         },
         orderBy: { lastUsedAt: "asc" },
@@ -89,6 +90,11 @@ export async function processGeneration(data: { generationId: string }) {
         });
       } else if (process.env.AGNES_API_KEY) {
         apiKey = process.env.AGNES_API_KEY;
+      } else if (
+        (await prisma.apiKey.count({ where: { status: "cooldown", disabledUntil: { gt: new Date() } } })) > 0
+      ) {
+        // Toutes les clés sont en pause après une limite 429 : on réessaiera, ce n'est pas définitif.
+        throw new TemporaryError("Clés Agnes en pause (limite de requêtes atteinte, 429). Nouvel essai bientôt.");
       } else {
         throw new Error(
           "Le fournisseur Agnes est activé mais aucune clé API valide n'est configurée côté serveur. Ajoutez une clé via /admin ou la variable AGNES_API_KEY."
@@ -138,7 +144,7 @@ export async function processGeneration(data: { generationId: string }) {
             data: {
               errorCount: { increment: 1 },
               rateLimitCount: { increment: 1 },
-              disabledUntil: new Date(Date.now() + 15 * 60 * 1000),
+              disabledUntil: new Date(Date.now() + 60 * 1000), // pause courte : 1 minute
               status: "cooldown",
             },
           });
@@ -336,11 +342,20 @@ export async function startWorkerInProcess() {
             await failAndRefund(data.generationId, err?.message || "Erreur");
             return;
           }
-          const wait = config.queue.memoryRetryDelayMs * attempt;
+          const wait = config.queue.memoryRetryDelayMs;
           safeLog("worker", `fournisseur occupé – nouvel essai ${attempt + 1}/${max} dans ${Math.round(wait / 1000)}s`, {
             generationId: data.generationId,
             error: err?.message,
           });
+          // Message visible sur la page de la vidéo (au lieu d'un "5 %" muet)
+          await prisma.videoGeneration
+            .update({
+              where: { id: data.generationId },
+              data: {
+                errorMessage: `Les serveurs d'Agnes sont occupés. Nouvel essai ${attempt + 1}/${max} dans ${Math.round(wait / 1000)} s…`,
+              },
+            })
+            .catch(() => {});
           await sleep(wait);
         }
       }

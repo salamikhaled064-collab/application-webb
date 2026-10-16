@@ -118,6 +118,10 @@ export default function GenerationDetailPage() {
                 <p className="text-sm text-muted">
                   {gen.status === "processing" ? "L'IA crée votre vidéo…" : "En file d'attente…"}
                 </p>
+                {gen.errorMessage && <p className="max-w-[260px] text-xs font-medium text-warn">{gen.errorMessage}</p>}
+                <p className="max-w-[260px] text-xs text-muted">
+                  Cela peut prendre quelques minutes, et jusqu&apos;à 30 minutes quand Agnes est saturée. Gardez cette page ouverte : la vidéo apparaîtra ici et dans l&apos;historique.
+                </p>
               </div>
             )}
             {gen.status === "failed" && <p className="absolute inset-0 flex items-center justify-center p-8 text-center text-sm text-muted">Aucune vidéo générée.</p>}

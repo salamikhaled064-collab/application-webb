@@ -104,8 +104,8 @@ export const config = {
     maxAttempts: parseInt(process.env.GENERATION_MAX_ATTEMPTS || "3", 10),
     backoffMs: parseInt(process.env.GENERATION_BACKOFF_MS || "5000", 10),
     // Sans Redis : nombre d'essais quand le fournisseur est saturé (503), et délai entre essais
-    memoryRetries: parseInt(process.env.MEMORY_RETRIES || "6", 10),
-    memoryRetryDelayMs: parseInt(process.env.MEMORY_RETRY_DELAY_MS || "20000", 10),
+    memoryRetries: parseInt(process.env.MEMORY_RETRIES || "40", 10),
+    memoryRetryDelayMs: parseInt(process.env.MEMORY_RETRY_DELAY_MS || "45000", 10), // délai CONSTANT entre essais
   },
   runWorkerInApi:
     process.env.RUN_WORKER_IN_API === "true" ||
