@@ -63,7 +63,7 @@ vi.mock("../services/storage-service", () => ({
 }));
 vi.mock("../queues/generation-queue", () => ({
   setJobHandler: vi.fn(),
-  enqueueGeneration: vi.fn(),
+  enqueueGeneration: vi.fn(async () => {}),
   initQueue: vi.fn(),
   closeQueue: vi.fn(),
   getBullConnection: vi.fn(() => null),
@@ -90,7 +90,8 @@ vi.mock("@ai-video/video-provider", () => {
 });
 
 import { encrypt } from "../lib/crypto";
-import { processGeneration, TemporaryError } from "../workers/generation-worker";
+import { processGeneration, TemporaryError, startWorkerInProcess } from "../workers/generation-worker";
+import { setJobHandler, enqueueGeneration } from "../queues/generation-queue";
 
 let seq = 0;
 function addKey(provider: string, key: string) {
@@ -229,5 +230,25 @@ describe("bascule automatique des clés", () => {
     key("bp-a").lastUsedAt = new Date(Date.now() - 1000);
     await processGeneration({ generationId: "g1" });
     expect(h.calls[0]).toBe("byteplus:bp-b");
+  });
+
+  it("une saturation NE BLOQUE PAS la file : le nouvel essai est reprogrammé, le travailleur est libéré", async () => {
+    vi.useFakeTimers();
+    try {
+      addKey("byteplus", "bp-1");
+      h.behavior = { "bp-1": "temporary" };
+      await startWorkerInProcess();
+      const handler = (setJobHandler as any).mock.calls.at(-1)[0];
+
+      await handler({ generationId: "g1" }); // doit se terminer TOUT DE SUITE (sans attendre 45 s)
+      expect(enqueueGeneration).not.toHaveBeenCalled();
+      expect(h.gen.errorMessage).toContain("Nouvel essai");
+      expect(h.gen.status).toBe("queued");
+
+      await vi.advanceTimersByTimeAsync(46_000);
+      expect(enqueueGeneration).toHaveBeenCalledWith("g1");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

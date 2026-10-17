@@ -12,7 +12,7 @@ type JobHandler = (data: GenerationJobData) => Promise<void>;
 
 let handler: JobHandler | null = null;
 const memoryQueue: string[] = [];
-let memoryProcessing = false;
+let memoryActive = 0;
 
 // BullMQ types kept optional so project builds without redis installed yet
 let bullQueue: any = null;
@@ -72,18 +72,22 @@ export async function enqueueGeneration(generationId: string): Promise<void> {
   processMemoryQueue();
 }
 
-async function processMemoryQueue() {
-  if (memoryProcessing || !handler || memoryQueue.length === 0) return;
-  memoryProcessing = true;
-  while (memoryQueue.length > 0) {
+/**
+ * File mémoire : jusqu'à `config.queue.concurrency` travaux en parallèle.
+ * (Avant : un seul à la fois → un travail bloqué retenait tous les suivants.)
+ */
+function processMemoryQueue() {
+  if (!handler) return;
+  while (memoryActive < config.queue.concurrency && memoryQueue.length > 0) {
     const id = memoryQueue.shift()!;
-    try {
-      await handler({ generationId: id });
-    } catch (err: any) {
-      console.error(`[queue] memory job ${id} failed:`, err.message);
-    }
+    memoryActive++;
+    handler({ generationId: id })
+      .catch((err: any) => console.error(`[queue] memory job ${id} failed:`, err?.message))
+      .finally(() => {
+        memoryActive--;
+        processMemoryQueue();
+      });
   }
-  memoryProcessing = false;
 }
 
 export async function closeQueue() {

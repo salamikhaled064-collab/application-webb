@@ -467,17 +467,23 @@ export async function recoverStuckGenerations() {
   try {
     const stuck = await prisma.videoGeneration.findMany({
       where: { status: { in: ["pending", "queued", "processing"] } },
-      select: { id: true },
+      select: { id: true, userId: true, creditsUsed: true, createdAt: true },
+      orderBy: { createdAt: "asc" },
       take: 200,
     });
+    const limit = Date.now() - 2 * 60 * 60 * 1000; // 2 heures
+    let relaunched = 0;
     for (const g of stuck) {
-      await prisma.videoGeneration.update({
-        where: { id: g.id },
-        data: { status: "queued", progress: 0 },
-      });
+      if (g.createdAt.getTime() < limit) {
+        // Trop ancienne : on ne la rejoue pas (elle ferait la queue devant les nouvelles) → échec + remboursement
+        await failAndRefund(g.id, "Génération interrompue par un redémarrage du serveur. Relancez-la.");
+        continue;
+      }
+      await prisma.videoGeneration.update({ where: { id: g.id }, data: { status: "queued", progress: 0 } });
       await enqueueGeneration(g.id).catch(() => {});
+      relaunched++;
     }
-    if (stuck.length) safeLog("worker", `Recovered ${stuck.length} stuck generation(s)`);
+    if (stuck.length) safeLog("worker", `Recovery: ${relaunched} relancée(s), ${stuck.length - relaunched} abandonnée(s)`);
   } catch (e: any) {
     safeLog("worker", "recover error", { error: e?.message });
   }
@@ -488,45 +494,45 @@ export async function startWorkerInProcess() {
   if (getBullConnection()) {
     await startBullWorker();
   } else {
+    // Nombre d'essais par génération (en mémoire). Un nouvel essai est REPROGRAMMÉ avec un minuteur :
+    // le travailleur est libéré tout de suite, les autres générations ne sont jamais bloquées.
+    const attempts = new Map<string, number>();
     setJobHandler(async (data) => {
-      // Sans BullMQ il n'y a pas de retry automatique : on le fait ici quand le fournisseur est
-      // momentanément saturé (503), limité (429) ou injoignable. Si un fournisseur de SECOURS est
-      // configuré, on bascule dessus après quelques échecs.
+      const id = data.generationId;
       const max = Math.max(1, config.queue.memoryRetries);
-      let tries = 0;
-      for (;;) {
-        tries++;
-        try {
-          await processGeneration(data);
+      try {
+        await processGeneration(data);
+        attempts.delete(id);
+      } catch (err: any) {
+        const temporary = err instanceof TemporaryError || err?.name === "TemporaryError";
+        const tries = (attempts.get(id) ?? 0) + 1;
+
+        if (!temporary || tries >= max) {
+          attempts.delete(id);
+          await failAndRefund(id, err?.message || "Erreur");
           return;
-        } catch (err: any) {
-          const temporary = err instanceof TemporaryError || err?.name === "TemporaryError";
-          if (!temporary) {
-            await failAndRefund(data.generationId, err?.message || "Erreur");
-            return;
-          }
-
-          if (tries >= max) {
-            await failAndRefund(data.generationId, err?.message || "Erreur");
-            return;
-          }
-
-          const wait = config.queue.memoryRetryDelayMs;
-          safeLog("worker", `fournisseur occupé – nouvel essai ${tries + 1}/${max} dans ${Math.round(wait / 1000)}s`, {
-            generationId: data.generationId,
-            error: err?.message,
-          });
-          // Message visible sur la page de la vidéo (au lieu d'un "5 %" muet)
-          await prisma.videoGeneration
-            .update({
-              where: { id: data.generationId },
-              data: {
-                errorMessage: `Le fournisseur vidéo est occupé. Nouvel essai ${tries + 1}/${max} dans ${Math.round(wait / 1000)} s…`,
-              },
-            })
-            .catch(() => {});
-          await sleep(wait);
         }
+
+        attempts.set(id, tries);
+        const wait = config.queue.memoryRetryDelayMs;
+        safeLog("worker", `fournisseur occupé – nouvel essai ${tries + 1}/${max} dans ${Math.round(wait / 1000)}s`, {
+          generationId: id,
+          error: err?.message,
+        });
+        // Message visible sur la page de la vidéo
+        await prisma.videoGeneration
+          .update({
+            where: { id },
+            data: {
+              status: "queued",
+              errorMessage: `Les fournisseurs vidéo sont occupés. Nouvel essai ${tries + 1}/${max} dans ${Math.round(wait / 1000)} s…`,
+            },
+          })
+          .catch(() => {});
+        const timer = setTimeout(() => {
+          enqueueGeneration(id).catch(() => {});
+        }, wait);
+        timer.unref?.();
       }
     });
     safeLog("worker", `In-process memory handler ready (provider=${config.videoProvider})`);
