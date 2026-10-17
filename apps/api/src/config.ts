@@ -66,7 +66,25 @@ export const config = {
     "ENCRYPTION_KEY",
     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   ),
-  videoProvider: (process.env.VIDEO_PROVIDER || "mock") as "mock" | "agnes",
+  /**
+   * "auto" (défaut) : BytePlus en premier, puis Agnes, selon les clés disponibles (aucune clé = mode démo).
+   * "byteplus" | "agnes" : ce fournisseur d'abord (+ VIDEO_PROVIDER_FALLBACK en secours).
+   * "mock" : démonstration uniquement.
+   */
+  videoProvider: (process.env.VIDEO_PROVIDER || "auto") as "auto" | "mock" | "agnes" | "byteplus",
+  /** Fournisseur de SECOURS : utilisé automatiquement si le principal reste saturé. Ex : VIDEO_PROVIDER=agnes + VIDEO_PROVIDER_FALLBACK=byteplus */
+  videoProviderFallback: (process.env.VIDEO_PROVIDER_FALLBACK || "") as "" | "agnes" | "byteplus",
+  byteplus: {
+    // seedance-1-5-pro-251215 : modèle cité dans la documentation officielle (texte, image, 4–12 s)
+    model: process.env.BYTEPLUS_MODEL || "seedance-1-5-pro-251215",
+    baseUrl: (process.env.BYTEPLUS_BASE_URL || "https://ark.ap-southeast.bytepluses.com/api/v3").replace(/\/+$/, ""),
+    // 480p consomme environ 2 fois moins de quota gratuit que 720p
+    resolution: process.env.BYTEPLUS_RESOLUTION || "720p",
+    generateAudio: process.env.BYTEPLUS_GENERATE_AUDIO === "true",
+    watermark: process.env.BYTEPLUS_WATERMARK === "true",
+    requestTimeoutMs: parseInt(process.env.BYTEPLUS_REQUEST_TIMEOUT_MS || "60000", 10),
+    resultTimeoutMs: parseInt(process.env.BYTEPLUS_RESULT_TIMEOUT_MS || "30000", 10),
+  },
   agnes: {
     // agnes-video-v2.0 a été RETIRÉ le 25/09/2026 → Video 2.5 Flash (720P, 4 à 12 s)
     model: process.env.AGNES_MODEL || "agnes-video-2.5-flash",

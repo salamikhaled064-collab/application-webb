@@ -9,6 +9,7 @@ import type {
   VideoGenerationResult,
   VideoProvider,
 } from "./types";
+import { classifyError } from "./types";
 
 export interface AgnesConfig {
   model: string;
@@ -124,6 +125,7 @@ export class AgnesVideoProvider implements VideoProvider {
           providerJobId: "",
           status: "failed",
           errorMessage: "Rate limit atteint (429). Réessayez plus tard.",
+          errorKind: "rate_limit",
           raw: json,
         };
       }
@@ -132,6 +134,7 @@ export class AgnesVideoProvider implements VideoProvider {
           providerJobId: "",
           status: "failed",
           errorMessage: `Clé Agnes refusée (${res.status}). Vérifiez la clé dans /admin. ${message}`,
+          errorKind: "auth",
           raw: json,
         };
       }
@@ -142,6 +145,7 @@ export class AgnesVideoProvider implements VideoProvider {
           status: "failed",
           errorMessage:
             "Erreur Agnes (503) : les serveurs vidéo d'Agnes sont saturés en ce moment (file d'attente pleine). Réessayez dans quelques minutes.",
+          errorKind: "temporary",
           raw: json,
         };
       }
@@ -150,6 +154,7 @@ export class AgnesVideoProvider implements VideoProvider {
         providerJobId: "",
         status: "failed",
         errorMessage: `Erreur Agnes (${res.status}) : ${message}`,
+        errorKind: classifyError(res.status, message),
         raw: json,
       };
     }
@@ -162,6 +167,7 @@ export class AgnesVideoProvider implements VideoProvider {
         providerJobId: "",
         status: "failed",
         errorMessage: "Réponse Agnes invalide : identifiant de job manquant.",
+        errorKind: "temporary",
         raw: json,
       };
     }

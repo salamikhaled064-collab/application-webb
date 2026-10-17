@@ -16,7 +16,82 @@ import {
   getBullConnection,
   getQueueName,
 } from "../queues/generation-queue";
-import { MockVideoProvider, AgnesVideoProvider, type VideoProvider } from "@ai-video/video-provider";
+import {
+  MockVideoProvider,
+  AgnesVideoProvider,
+  BytePlusVideoProvider,
+  type VideoProvider,
+  type VideoGenerationResult,
+} from "@ai-video/video-provider";
+
+export type ProviderName = "mock" | "agnes" | "byteplus";
+
+const LABEL: Record<ProviderName, string> = { mock: "démo", agnes: "Agnes", byteplus: "BytePlus" };
+const ENV_KEY: Record<ProviderName, string> = { mock: "", agnes: "AGNES_API_KEY", byteplus: "BYTEPLUS_API_KEY" };
+
+/** Ordre des fournisseurs à essayer. En mode "auto" : BytePlus d'abord, puis Agnes. */
+function buildChain(): ProviderName[] {
+  const v = config.videoProvider;
+  if (v === "mock") return ["mock"];
+  if (v === "auto") return ["byteplus", "agnes"];
+  const fb = config.videoProviderFallback;
+  return fb && fb !== v ? [v, fb] : [v];
+}
+
+interface Candidate {
+  provider: ProviderName;
+  keyId: string | null;
+  key: string;
+  label: string;
+}
+
+/**
+ * Toutes les clés utilisables, dans l'ordre : fournisseur 1 (clés les moins récemment utilisées d'abord),
+ * puis fournisseur 2… Les clés « en pause » dont la pause est écoulée redeviennent utilisables.
+ */
+async function listCandidates(chain: ProviderName[]): Promise<Candidate[]> {
+  const { decrypt } = await import("../lib/crypto");
+  const out: Candidate[] = [];
+  for (const provider of chain) {
+    if (provider === "mock") {
+      out.push({ provider, keyId: null, key: "mock", label: "démo" });
+      continue;
+    }
+    const rows = await prisma.apiKey.findMany({
+      where: {
+        provider,
+        status: { in: ["active", "cooldown"] },
+        OR: [{ disabledUntil: null }, { disabledUntil: { lt: new Date() } }],
+      },
+      orderBy: { lastUsedAt: "asc" },
+    });
+    for (const row of rows) {
+      try {
+        out.push({ provider, keyId: row.id, key: decrypt(row.encryptedKey), label: `${LABEL[provider]} ${row.maskedKey}` });
+      } catch {
+        // Clé illisible (ENCRYPTION_KEY changée ?) : on la signale et on passe à la suivante
+        await prisma.apiKey
+          .update({ where: { id: row.id }, data: { status: "disabled", lastError: "Clé illisible : ENCRYPTION_KEY a probablement changé. Ressaisissez la clé." } })
+          .catch(() => {});
+      }
+    }
+    const envKey = process.env[ENV_KEY[provider]];
+    if (envKey) out.push({ provider, keyId: null, key: envKey, label: `${LABEL[provider]} (clé du serveur)` });
+  }
+  return out;
+}
+
+/** Image de départ en base64 (BytePlus l'accepte directement : pas besoin d'URL publique). */
+async function uploadAsDataUrl(upload: { storageKey: string; mimeType: string }): Promise<string> {
+  let buf: Buffer;
+  if (process.env.STORAGE_PROVIDER === "s3") {
+    buf = await storage.getObjectBuffer(upload.storageKey);
+  } else {
+    const fs = await import("fs/promises");
+    buf = await fs.readFile(storage.getAbsolutePath(upload.storageKey));
+  }
+  return `data:${upload.mimeType};base64,${buf.toString("base64")}`;
+}
 
 /** Mark errors that BullMQ should retry */
 export class TemporaryError extends Error {
@@ -30,8 +105,19 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-function getProvider(): VideoProvider {
-  if (config.videoProvider === "agnes") {
+function getProvider(name: ProviderName): VideoProvider {
+  if (name === "byteplus") {
+    return new BytePlusVideoProvider({
+      model: config.byteplus.model,
+      baseUrl: config.byteplus.baseUrl,
+      resolution: config.byteplus.resolution,
+      generateAudio: config.byteplus.generateAudio,
+      watermark: config.byteplus.watermark,
+      requestTimeoutMs: config.byteplus.requestTimeoutMs,
+      resultTimeoutMs: config.byteplus.resultTimeoutMs,
+    });
+  }
+  if (name === "agnes") {
     return new AgnesVideoProvider({
       model: config.agnes.model,
       baseUrl: config.agnes.baseUrl,
@@ -66,101 +152,166 @@ export async function processGeneration(data: { generationId: string }) {
       throw new Error("Image manquante"); // permanent
     }
 
-    const provider = getProvider();
+    // ---- Choix du fournisseur ET de la clé, avec bascule automatique ----
+    // Chaque clé est essayée à tour de rôle ; si elle échoue (refusée, quota épuisé, limite, saturation),
+    // on passe IMMÉDIATEMENT à la suivante, puis au fournisseur suivant.
+    const chain = buildChain();
+    let candidates = await listCandidates(chain);
+    if (candidates.length === 0 && config.videoProvider === "auto") {
+      candidates = [{ provider: "mock", keyId: null, key: "mock", label: "démo" }]; // aucune clé : mode démonstration
+    }
+    if (candidates.length === 0) {
+      const paused = await prisma.apiKey.count({
+        where: { provider: { in: chain }, status: "cooldown", disabledUntil: { gt: new Date() } },
+      });
+      if (paused > 0) {
+        throw new TemporaryError("Toutes les clés sont en pause (limite de requêtes atteinte). Nouvel essai bientôt.");
+      }
+      throw new Error(
+        `Aucune clé API utilisable pour ${chain.map((c) => LABEL[c]).join(" / ")}. Ajoutez une clé dans /admin → Clés API (ou réactivez-en une).`
+      );
+    }
+
+    let providerName: ProviderName = "mock";
+    let provider: VideoProvider = new MockVideoProvider();
     let apiKey = "mock";
     let apiKeyId: string | null = null;
+    let created: VideoGenerationResult | undefined;
 
-    if (config.videoProvider === "agnes") {
-      // Prefer encrypted keys from /admin; fallback to AGNES_API_KEY env
-      const keyRow = await prisma.apiKey.findFirst({
-        where: {
-          // "cooldown" doit pouvoir redevenir utilisable une fois la pause écoulée
-          status: { in: ["active", "cooldown"] },
-          OR: [{ disabledUntil: null }, { disabledUntil: { lt: new Date() } }],
-        },
-        orderBy: { lastUsedAt: "asc" },
-      });
-      if (keyRow) {
-        const { decrypt } = await import("../lib/crypto");
-        apiKey = decrypt(keyRow.encryptedKey);
-        apiKeyId = keyRow.id;
+    const skipped: string[] = [];
+    const skipProviders = new Set<ProviderName>();
+    let lastTemporary = "";
+    let firstFatal = "";
+    let dataUrlCache: string | undefined;
+
+    for (const cand of candidates) {
+      if (skipProviders.has(cand.provider)) continue;
+      const p = getProvider(cand.provider);
+
+      // Agnes télécharge l'image depuis une URL PUBLIQUE signée ; BytePlus reçoit l'image en base64.
+      let imageUrl: string | undefined;
+      let imageDataUrl: string | undefined;
+      if (gen.upload && cand.provider === "byteplus") {
+        imageDataUrl = dataUrlCache ??= await uploadAsDataUrl(gen.upload);
+      }
+      if (gen.upload && cand.provider === "agnes") {
+        const signed = buildSignedUploadUrl(gen.upload.id);
+        if (!signed) {
+          skipped.push("Agnes : PUBLIC_BASE_URL manquante (l'image ne peut pas être lue)");
+          skipProviders.add("agnes");
+          continue;
+        }
+        imageUrl = signed;
+      }
+
+      if (cand.keyId) {
         await prisma.apiKey.update({
-          where: { id: keyRow.id },
+          where: { id: cand.keyId },
           data: { lastUsedAt: new Date(), usageCount: { increment: 1 } },
         });
-      } else if (process.env.AGNES_API_KEY) {
-        apiKey = process.env.AGNES_API_KEY;
-      } else if (
-        (await prisma.apiKey.count({ where: { status: "cooldown", disabledUntil: { gt: new Date() } } })) > 0
-      ) {
-        // Toutes les clés sont en pause après une limite 429 : on réessaiera, ce n'est pas définitif.
-        throw new TemporaryError("Clés Agnes en pause (limite de requêtes atteinte, 429). Nouvel essai bientôt.");
-      } else {
-        throw new Error(
-          "Le fournisseur Agnes est activé mais aucune clé API valide n'est configurée côté serveur. Ajoutez une clé via /admin ou la variable AGNES_API_KEY."
-        );
       }
-    }
 
-    // Agnes Video 2.5 télécharge l'image depuis une URL PUBLIQUE (signée, temporaire).
-    let imageUrl: string | undefined;
-    if (config.videoProvider === "agnes" && gen.upload) {
-      const signed = buildSignedUploadUrl(gen.upload.id);
-      if (!signed) {
-        throw new Error(
-          "PUBLIC_BASE_URL manquante : Agnes ne peut pas lire l'image. Ajoutez PUBLIC_BASE_URL (adresse publique de l'API) sur le service API."
+      let res: VideoGenerationResult;
+      try {
+        res = await p.createVideo(
+          {
+            model: cand.provider === "byteplus" ? config.byteplus.model : config.agnes.model,
+            prompt: gen.finalPrompt || gen.prompt,
+            imageUrl,
+            imageDataUrl,
+            aspectRatio: gen.format,
+            seconds: gen.durationSeconds,
+            width: gen.width,
+            height: gen.height,
+            numFrames: gen.numFrames,
+            frameRate: gen.frameRate,
+          },
+          cand.key
         );
+      } catch (e: any) {
+        res = {
+          providerJobId: "",
+          status: "failed",
+          errorKind: "temporary",
+          errorMessage: `Erreur réseau (${cand.label}) : ${e?.message || "inconnue"}`,
+        };
       }
-      imageUrl = signed;
-    }
 
-    let created;
-    try {
-      created = await provider.createVideo(
-        {
-          model: config.agnes.model,
-          prompt: gen.finalPrompt || gen.prompt,
-          imageUrl,
-          aspectRatio: gen.format,
-          seconds: gen.durationSeconds,
-          width: gen.width,
-          height: gen.height,
-          numFrames: gen.numFrames,
-          frameRate: gen.frameRate,
-        },
-        apiKey
-      );
-      // Création refusée (clé invalide, 400, 429…) : on échoue TOUT DE SUITE avec le vrai message,
-      // au lieu d'interroger pendant 10 minutes un identifiant vide.
-      if (created.status === "failed" || !created.providerJobId) {
-        throw new Error(created.errorMessage || "Création refusée par le fournisseur vidéo");
-      }
-    } catch (err: any) {
-      const msg = err.message || "";
-      if (/429|rate limit|timeout|ECONNRESET|5\d\d|network|abort/i.test(msg)) {
-        if (apiKeyId && /429/.test(msg)) {
-          await prisma.apiKey.update({
-            where: { id: apiKeyId },
-            data: {
-              errorCount: { increment: 1 },
-              rateLimitCount: { increment: 1 },
-              disabledUntil: new Date(Date.now() + 60 * 1000), // pause courte : 1 minute
-              status: "cooldown",
-            },
-          });
+      if (res.status !== "failed" && res.providerJobId) {
+        created = res;
+        provider = p;
+        providerName = cand.provider;
+        apiKey = cand.key;
+        apiKeyId = cand.keyId;
+        if (cand.keyId) {
+          // La clé a fonctionné : on efface une éventuelle pause / erreur précédente
+          await prisma.apiKey
+            .update({ where: { id: cand.keyId }, data: { status: "active", disabledUntil: null, lastError: null } })
+            .catch(() => {});
         }
-        throw new TemporaryError(msg);
+        break;
       }
-      throw err; // permanent
+
+      const kind = res.errorKind ?? "fatal";
+      const msg = res.errorMessage || "Création refusée par le fournisseur vidéo";
+      safeLog("worker", `échec avec ${cand.label} (${kind}) – clé suivante`, { generationId, error: msg });
+
+      if (kind === "auth" || kind === "quota") {
+        // Clé inutilisable : désactivée automatiquement (réactivable depuis /admin)
+        if (cand.keyId) {
+          await prisma.apiKey
+            .update({
+              where: { id: cand.keyId },
+              data: { status: "disabled", errorCount: { increment: 1 }, lastError: msg.slice(0, 300) },
+            })
+            .catch(() => {});
+        }
+        skipped.push(`${cand.label} : ${msg}`);
+        continue;
+      }
+      if (kind === "rate_limit") {
+        if (cand.keyId) {
+          await prisma.apiKey
+            .update({
+              where: { id: cand.keyId },
+              data: {
+                status: "cooldown",
+                disabledUntil: new Date(Date.now() + 60 * 1000), // pause courte : 1 minute
+                errorCount: { increment: 1 },
+                rateLimitCount: { increment: 1 },
+                lastError: msg.slice(0, 300),
+              },
+            })
+            .catch(() => {});
+        }
+        lastTemporary = msg;
+        continue;
+      }
+      if (kind === "temporary") {
+        lastTemporary = msg;
+        continue;
+      }
+      // fatal : demande refusée (contenu, paramètres). Changer de clé ne sert à rien chez ce fournisseur.
+      firstFatal ||= msg;
+      skipProviders.add(cand.provider);
+    }
+
+    if (!created) {
+      if (lastTemporary) throw new TemporaryError(lastTemporary); // on réessaiera (toute la chaîne)
+      if (firstFatal) throw new Error(firstFatal);
+      throw new Error(`Aucune clé utilisable. ${skipped.join(" | ")}`);
     }
 
     const providerJobId = created.providerJobId;
     await prisma.videoGeneration.update({
       where: { id: generationId },
       data: {
+        provider: providerName,
         providerJobId,
         progress: 15,
-        ...(apiKeyId ? { apiKeyId } : {}),
+        // Toujours écrit (null inclus) : sinon l'identifiant d'une clé utilisée lors d'un essai précédent
+        // resterait et le suivi interrogerait le fournisseur avec la mauvaise clé.
+        apiKeyId,
       },
     });
 
@@ -175,7 +326,7 @@ export async function processGeneration(data: { generationId: string }) {
       try {
         // For Agnes, reuse same key
         let pollKey = apiKey;
-        if (config.videoProvider === "agnes" && current.apiKeyId) {
+        if (providerName !== "mock" && current.apiKeyId) {
           const keyRow = await prisma.apiKey.findUnique({ where: { id: current.apiKeyId } });
           if (keyRow) {
             const { decrypt } = await import("../lib/crypto");
@@ -194,7 +345,7 @@ export async function processGeneration(data: { generationId: string }) {
       if (status.status === "completed" && status.videoUrl) {
         let videoStorageKey: string | null = null;
         // Mock : vidéo de démonstration servie par redirection, on ne la télécharge pas.
-        if (config.videoProvider !== "mock") {
+        if (providerName !== "mock") {
           try {
             const dl = await storage.downloadVideoToStorage(
               status.videoUrl,
@@ -202,10 +353,19 @@ export async function processGeneration(data: { generationId: string }) {
             );
             videoStorageKey = dl.storageKey;
           } catch (dlErr: any) {
-            throw new Error(`Téléchargement vidéo impossible: ${dlErr.message}`);
+            // Non bloquant : le lien du fournisseur reste valable ~24 h, la vidéo est servie par redirection.
+            safeLog("worker", "téléchargement vidéo impossible, lien fournisseur conservé", {
+              generationId,
+              error: dlErr?.message,
+            });
           }
         }
 
+        if (current.apiKeyId) {
+          await prisma.apiKey
+            .update({ where: { id: current.apiKeyId }, data: { successCount: { increment: 1 } } })
+            .catch(() => {});
+        }
         await prisma.videoGeneration.update({
           where: { id: generationId },
           data: {
@@ -329,21 +489,30 @@ export async function startWorkerInProcess() {
     await startBullWorker();
   } else {
     setJobHandler(async (data) => {
-      // Sans BullMQ il n'y a pas de retry automatique : on le fait ici quand le
-      // fournisseur est momentanément saturé (503 "queue is full"), 429, réseau...
+      // Sans BullMQ il n'y a pas de retry automatique : on le fait ici quand le fournisseur est
+      // momentanément saturé (503), limité (429) ou injoignable. Si un fournisseur de SECOURS est
+      // configuré, on bascule dessus après quelques échecs.
       const max = Math.max(1, config.queue.memoryRetries);
-      for (let attempt = 1; attempt <= max; attempt++) {
+      let tries = 0;
+      for (;;) {
+        tries++;
         try {
           await processGeneration(data);
           return;
         } catch (err: any) {
           const temporary = err instanceof TemporaryError || err?.name === "TemporaryError";
-          if (!temporary || attempt === max) {
+          if (!temporary) {
             await failAndRefund(data.generationId, err?.message || "Erreur");
             return;
           }
+
+          if (tries >= max) {
+            await failAndRefund(data.generationId, err?.message || "Erreur");
+            return;
+          }
+
           const wait = config.queue.memoryRetryDelayMs;
-          safeLog("worker", `fournisseur occupé – nouvel essai ${attempt + 1}/${max} dans ${Math.round(wait / 1000)}s`, {
+          safeLog("worker", `fournisseur occupé – nouvel essai ${tries + 1}/${max} dans ${Math.round(wait / 1000)}s`, {
             generationId: data.generationId,
             error: err?.message,
           });
@@ -352,7 +521,7 @@ export async function startWorkerInProcess() {
             .update({
               where: { id: data.generationId },
               data: {
-                errorMessage: `Les serveurs d'Agnes sont occupés. Nouvel essai ${attempt + 1}/${max} dans ${Math.round(wait / 1000)} s…`,
+                errorMessage: `Le fournisseur vidéo est occupé. Nouvel essai ${tries + 1}/${max} dans ${Math.round(wait / 1000)} s…`,
               },
             })
             .catch(() => {});

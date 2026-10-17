@@ -24,7 +24,7 @@ services:
       - key: ENCRYPTION_KEY
         generateValue: true
       - key: VIDEO_PROVIDER
-        value: mock # passez à "agnes" quand une clé est ajoutée dans /admin
+        value: auto # BytePlus d'abord, puis Agnes, selon les clés ajoutées dans /admin (aucune clé = démo)
       - key: RUN_WORKER_IN_API
         value: "true"
       - key: STORAGE_PROVIDER

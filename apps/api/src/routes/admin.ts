@@ -22,6 +22,18 @@ async function audit(adminId: string, action: string, targetType: string, target
 router.get(
   "/stats",
   ah(async (_req, res) => {
+    const v = config.videoProvider;
+    const fb = config.videoProviderFallback;
+    const chain: string[] =
+      v === "mock" ? ["mock"] : v === "auto" ? ["byteplus", "agnes"] : fb && fb !== v ? [v, fb] : [v];
+    const keysByProvider = {
+      agnes: await prisma.apiKey.count({ where: { status: "active", provider: "agnes" } }),
+      byteplus: await prisma.apiKey.count({ where: { status: "active", provider: "byteplus" } }),
+    };
+    const envKey = (p: string) => Boolean(process.env[p === "byteplus" ? "BYTEPLUS_API_KEY" : "AGNES_API_KEY"]);
+    const usable = chain.filter((c) => c !== "mock" && ((keysByProvider as any)[c] > 0 || envKey(c)));
+    // En mode "auto" sans aucune clé, le site tourne en démonstration
+    const demoActive = v === "mock" || (v === "auto" && usable.length === 0);
     const [users, generations, completed, failed, processing, keys] = await Promise.all([
       prisma.user.count(),
       prisma.videoGeneration.count(),
@@ -39,8 +51,16 @@ router.get(
       activeKeys: keys,
       // État du fournisseur vidéo : l'admin voit tout de suite si c'est le mode démo
       provider: config.videoProvider,
-      model: config.videoProvider === "agnes" ? config.agnes.model : "démo",
+      chain,
+      demoActive,
+      models: {
+        byteplus: config.byteplus.model,
+        agnes: config.agnes.model,
+      },
+      activeKeysByProvider: keysByProvider,
+      // Agnes lit l'image via une URL publique ; BytePlus la reçoit en base64
       publicUrlConfigured: Boolean(config.publicBaseUrl),
+      needsPublicUrl: chain.includes("agnes"),
     });
   })
 );
@@ -166,6 +186,7 @@ router.get(
         rateLimitCount: true,
         lastUsedAt: true,
         disabledUntil: true,
+        lastError: true,
         createdAt: true,
       },
       orderBy: { createdAt: "desc" },
@@ -176,7 +197,7 @@ router.get(
 
 const addKeySchema = z.object({
   key: z.string().trim().min(8, "Clé trop courte").max(512),
-  provider: z.string().default("agnes"),
+  provider: z.enum(["agnes", "byteplus"]).default("agnes"),
 });
 
 router.post(

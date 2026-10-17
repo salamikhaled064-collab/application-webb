@@ -16,6 +16,8 @@ export interface VideoGenerationRequest {
   image?: string;
   /** URL PUBLIQUE de l'image de départ (Agnes doit pouvoir la télécharger). Absente pour PROMPT_ONLY. */
   imageUrl?: string;
+  /** Image de départ en base64 ("data:image/png;base64,...") – BytePlus l'accepte, sans URL publique */
+  imageDataUrl?: string;
   /** Format de sortie : "9:16" | "16:9" | "1:1" | "3:4" | "4:3" | "21:9" */
   aspectRatio?: string;
   /** Durée du clip en secondes (Agnes Video 2.5 : 4 à 12) */
@@ -29,7 +31,32 @@ export interface VideoGenerationRequest {
   mode?: "PROMPT_ONLY" | "IMAGE_TO_VIDEO";
 }
 
+/**
+ * Nature d'un échec de création, utilisée pour décider quoi faire :
+ *  auth       → clé refusée          : on désactive la clé et on essaie la suivante
+ *  quota      → quota épuisé         : idem
+ *  rate_limit → trop de requêtes     : pause courte de la clé, on essaie la suivante
+ *  temporary  → saturation / réseau  : on essaie la suivante, puis on réessaie plus tard
+ *  fatal      → demande refusée (contenu, paramètres) : inutile de changer de clé
+ */
+export type ProviderErrorKind = "auth" | "quota" | "rate_limit" | "temporary" | "fatal";
+
+export function classifyError(status: number, text: string): ProviderErrorKind {
+  if (status === 401 || status === 403) return "auth";
+  if (
+    status === 402 ||
+    /quota|exhaust|SetLimitExceeded|insufficient|balance|overdue|not activated|ModelNotOpen|payment/i.test(text)
+  ) {
+    return "quota";
+  }
+  if (status === 429) return "rate_limit";
+  if (status >= 500 || status === 408) return "temporary";
+  return "fatal";
+}
+
 export interface VideoGenerationResult {
+  /** Renseigné quand status === "failed" à la création */
+  errorKind?: ProviderErrorKind;
   providerJobId: string;
   status: GenerationStatus;
   progress?: number;

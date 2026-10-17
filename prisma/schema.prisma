@@ -42,6 +42,8 @@ model ApiKey {
   rateLimitCount Int       @default(0)
   lastUsedAt     DateTime?
   disabledUntil  DateTime?
+  /// Dernier message d'erreur reçu avec cette clé (affiché dans /admin)
+  lastError      String?
   createdAt      DateTime  @default(now())
 
   generations VideoGeneration[]

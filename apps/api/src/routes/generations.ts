@@ -132,8 +132,8 @@ const serveVideo = ah(async (req, res) => {
     }
   }
 
-  // Fournisseur mock : vidéo de démonstration servie par redirection
-  if (gen.provider === "mock" && gen.videoUrl) {
+  // Pas de fichier stocké (mock, téléchargement impossible, disque effacé) : lien du fournisseur (~24 h)
+  if (gen.videoUrl) {
     return res.redirect(302, gen.videoUrl);
   }
 

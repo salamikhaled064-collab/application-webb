@@ -14,7 +14,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "gens", label: "Générations" },
 ];
 
-const KEY_STATUS: Record<string, string> = { active: "Active", disabled: "Désactivée", cooldown: "En pause (limite atteinte)" };
+const KEY_STATUS: Record<string, string> = { active: "Active", disabled: "Désactivée (refusée, quota épuisé ou manuelle)", cooldown: "En pause 1 min (limite atteinte)" };
 
 export default function AdminPage() {
   const router = useRouter();
@@ -27,6 +27,7 @@ export default function AdminPage() {
   const [users, setUsers] = useState<any[]>([]);
   const [gens, setGens] = useState<any[]>([]);
   const [newKey, setNewKey] = useState("");
+  const [newKeyProvider, setNewKeyProvider] = useState<"agnes" | "byteplus">("byteplus");
   const [notice, setNotice] = useState<{ tone: "success" | "error"; text: string } | null>(null);
   const [grant, setGrant] = useState<Record<string, string>>({});
   const [adm, setAdm] = useState({ email: "", name: "", password: "" });
@@ -129,22 +130,32 @@ export default function AdminPage() {
 
       {tab === "overview" && stats && (
         <div className="mt-6 space-y-4">
-          {stats.provider === "mock" ? (
+          {stats.demoActive ? (
             <Alert tone="warn">
-              <strong>Mode démonstration actif.</strong> Les vidéos générées sont un exemple fixe (l&apos;image et le texte ne sont pas utilisés). Pour de vraies vidéos : ajoutez une clé Agnes dans l&apos;onglet « Clés API », puis mettez <code className="rounded bg-sunken px-1">VIDEO_PROVIDER=agnes</code> sur le service API.
+              <strong>Mode démonstration actif.</strong> Les vidéos générées sont un exemple fixe (l&apos;image et le texte ne sont pas utilisés). Pour de vraies vidéos : ajoutez au moins une clé dans l&apos;onglet « Clés API » (BytePlus recommandé). Le basculement se fait tout seul, sans modifier Render.
             </Alert>
           ) : (
             <>
               <Alert tone="success">
-                Fournisseur réel actif : <strong>{stats.model}</strong>. Clips de 4 à 12 secondes.
+                Ordre des fournisseurs :{" "}
+                <strong>
+                  {(stats.chain as string[])
+                    .map((c) => (c === "byteplus" ? "BytePlus" : c === "agnes" ? "Agnes" : c))
+                    .join(" → ")}
+                </strong>
+                . Chaque clé est essayée à tour de rôle ; si elle échoue, la suivante prend le relais automatiquement.
               </Alert>
-              {!stats.publicUrlConfigured && (
-                <Alert>
-                  <code className="rounded bg-sunken px-1">PUBLIC_BASE_URL</code> est absente : le mode « image → vidéo » ne fonctionnera pas. Ajoutez l&apos;adresse publique de l&apos;API sur le service API.
+              {(stats.chain as string[])
+                .filter((c) => c !== "mock")
+                .map((c) => (
+                  <p key={c} className="text-sm text-muted">
+                    {c === "byteplus" ? "BytePlus" : "Agnes"} : <strong className={stats.activeKeysByProvider?.[c] > 0 ? "text-ok" : "text-bad"}>{stats.activeKeysByProvider?.[c] ?? 0} clé(s) active(s)</strong> · modèle {stats.models?.[c]}
+                  </p>
+                ))}
+              {stats.needsPublicUrl && !stats.publicUrlConfigured && (
+                <Alert tone="warn">
+                  <code className="rounded bg-sunken px-1">PUBLIC_BASE_URL</code> est absente : Agnes ne pourra pas lire les images (« image → vidéo »). BytePlus n&apos;en a pas besoin.
                 </Alert>
-              )}
-              {stats.activeKeys === 0 && (
-                <Alert>Aucune clé API active : ajoutez-en une dans l&apos;onglet « Clés API ».</Alert>
               )}
             </>
           )}
@@ -169,39 +180,51 @@ export default function AdminPage() {
       {tab === "keys" && (
         <div className="mt-6 space-y-5">
           <div className="card p-5">
-            <label htmlFor="newkey" className="label">Ajouter une clé Agnes</label>
+            <label htmlFor="newkey" className="label">Ajouter une clé API</label>
             <div className="flex flex-col gap-2 sm:flex-row">
+              <select
+                aria-label="Fournisseur de la clé"
+                value={newKeyProvider}
+                onChange={(e) => setNewKeyProvider(e.target.value as "agnes" | "byteplus")}
+                className="input sm:!w-44"
+              >
+                <option value="byteplus">BytePlus</option>
+                <option value="agnes">Agnes</option>
+              </select>
               <input id="newkey" type="password" autoComplete="off" value={newKey} onChange={(e) => setNewKey(e.target.value)} placeholder="Collez la clé : elle ne sera plus jamais affichée en clair" className="input" />
               <button
                 className="btn-primary shrink-0"
                 disabled={newKey.trim().length < 8}
-                onClick={() => run(async () => { await apiFetch("/api/admin/api-keys", { method: "POST", body: JSON.stringify({ key: newKey.trim() }) }); setNewKey(""); }, "Clé ajoutée.")}
+                onClick={() => run(async () => { await apiFetch("/api/admin/api-keys", { method: "POST", body: JSON.stringify({ key: newKey.trim(), provider: newKeyProvider }) }); setNewKey(""); }, "Clé ajoutée.")}
               >
                 Ajouter la clé
               </button>
             </div>
-            <p className="hint">Les clés sont chiffrées en base. Pour utiliser les vraies vidéos, passez VIDEO_PROVIDER à « agnes » sur le service API.</p>
+            <p className="hint">
+              Vous pouvez ajouter <strong>autant de clés que vous voulez</strong>. Elles sont chiffrées en base et utilisées à tour de rôle. Si une clé échoue (refusée, quota gratuit épuisé, limite atteinte), elle est mise de côté automatiquement et la suivante prend le relais. Une clé désactivée se réactive d&apos;un clic.
+            </p>
           </div>
 
           <div className="card overflow-x-auto">
             <table className="w-full text-left text-sm">
               <thead className="border-b border-line text-muted">
                 <tr>
-                  {["Clé", "Statut", "Utilisations", "Erreurs", "Pause jusqu'à", ""].map((h) => (
+                  {["Clé", "Fournisseur", "Statut", "Succès / essais", "Dernière erreur", "Pause jusqu'à", ""].map((h) => (
                     <th key={h} className="whitespace-nowrap p-3.5 font-semibold">{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-line">
                 {keys.length === 0 && (
-                  <tr><td colSpan={6} className="p-8 text-center text-muted">Aucune clé enregistrée.</td></tr>
+                  <tr><td colSpan={7} className="p-8 text-center text-muted">Aucune clé enregistrée.</td></tr>
                 )}
                 {keys.map((k) => (
                   <tr key={k.id}>
                     <td className="p-3.5 font-mono text-xs">{k.maskedKey}</td>
+                    <td className="p-3.5 capitalize">{k.provider}</td>
                     <td className="p-3.5">{KEY_STATUS[k.status] || k.status}</td>
-                    <td className="p-3.5 tabular-nums">{k.usageCount}</td>
-                    <td className="p-3.5 tabular-nums">{k.errorCount}</td>
+                    <td className="p-3.5 tabular-nums">{k.successCount} / {k.usageCount}</td>
+                    <td className="max-w-xs p-3.5 text-xs text-bad">{k.lastError || ""}</td>
                     <td className="p-3.5 text-xs">{fmt(k.disabledUntil)}</td>
                     <td className="space-x-3 whitespace-nowrap p-3.5 text-right">
                       {k.status === "active" ? (
