@@ -138,6 +138,25 @@ export const VIDEO_PRESETS: Record<string, { width: number; height: number }> = 
 };
 
 /** Agnes Video 2.5 : un clip dure de 4 à 12 secondes. */
+/**
+ * Modèles BytePlus essayés DANS L'ORDRE avec une même clé. Le quota gratuit est par modèle :
+ * quand l'un est épuisé ou inaccessible, on passe au suivant. (Lite a un modèle distinct pour texte / image.)
+ * Personnalisable : BYTEPLUS_MODELS="modele1,modele2" (ou BYTEPLUS_MODEL pour un seul).
+ */
+export function byteplusModels(hasImage: boolean): string[] {
+  const custom = (process.env.BYTEPLUS_MODELS || process.env.BYTEPLUS_MODEL || "")
+    .split(",")
+    .map((m) => m.trim())
+    .filter(Boolean);
+  if (custom.length) return custom;
+  return [
+    "seedance-1-5-pro-251215",
+    "seedance-1-0-pro-250528",
+    "seedance-1-0-pro-fast-251015",
+    hasImage ? "seedance-1-0-lite-i2v-250428" : "seedance-1-0-lite-t2v-250428",
+  ];
+}
+
 export const MIN_CLIP_SECONDS = 4;
 export const MAX_CLIP_SECONDS = 12;
 export const USER_DURATIONS = [4, 6, 8, 10, 12];

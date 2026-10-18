@@ -35,11 +35,12 @@ export interface VideoGenerationRequest {
  * Nature d'un échec de création, utilisée pour décider quoi faire :
  *  auth       → clé refusée          : on désactive la clé et on essaie la suivante
  *  quota      → quota épuisé         : idem
+ *  model      → modèle inaccessible ou quota GRATUIT DU MODÈLE épuisé : on essaie le modèle suivant avec la même clé
  *  rate_limit → trop de requêtes     : pause courte de la clé, on essaie la suivante
  *  temporary  → saturation / réseau  : on essaie la suivante, puis on réessaie plus tard
  *  fatal      → demande refusée (contenu, paramètres) : inutile de changer de clé
  */
-export type ProviderErrorKind = "auth" | "quota" | "rate_limit" | "temporary" | "fatal";
+export type ProviderErrorKind = "auth" | "quota" | "model" | "rate_limit" | "temporary" | "fatal";
 
 export function classifyError(status: number, text: string): ProviderErrorKind {
   if (status === 401 || status === 403) return "auth";

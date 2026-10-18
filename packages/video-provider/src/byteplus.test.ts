@@ -13,7 +13,7 @@ const cfg = {
   requestTimeoutMs: 5000,
   resultTimeoutMs: 5000,
 };
-const base = { model: "x", prompt: "Une femme présente un produit" };
+const base = { model: "seedance-1-5-pro-251215", prompt: "Une femme présente un produit" };
 
 describe("BytePlus payload", () => {
   it("texte seul : un seul bloc texte, pas d'image", () => {
@@ -45,7 +45,8 @@ describe("BytePlus payload", () => {
   });
 
   it("generate_audio absent pour les modèles qui ne le supportent pas", () => {
-    const p: any = buildBytePlusPayload({ ...base, seconds: 5 }, { ...cfg, model: "seedance-1-0-pro-250528" });
+    const p: any = buildBytePlusPayload({ ...base, model: "seedance-1-0-pro-250528", seconds: 5 }, cfg);
+    expect(p.model).toBe("seedance-1-0-pro-250528"); // le modèle demandé prime sur celui de la config
     expect(p).not.toHaveProperty("generate_audio");
   });
 

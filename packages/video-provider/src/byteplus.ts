@@ -42,15 +42,16 @@ export function buildBytePlusPayload(request: VideoGenerationRequest, cfg: ByteP
     content.push({ type: "image_url", image_url: { url: image }, role: "first_frame" });
   }
 
+  const model = request.model || cfg.model;
   const payload: Record<string, unknown> = {
-    model: cfg.model,
+    model,
     content,
     resolution: cfg.resolution,
     ratio: request.aspectRatio || "16:9",
     duration,
     watermark: cfg.watermark,
   };
-  if (supportsAudio(cfg.model)) payload.generate_audio = cfg.generateAudio;
+  if (supportsAudio(model)) payload.generate_audio = cfg.generateAudio;
   return payload;
 }
 
@@ -66,6 +67,23 @@ function errorInfo(json: any, bodyText: string, status: number): { code: string;
   return { code: String(code), message: String(message).slice(0, 300) };
 }
 
+/**
+ * Chez BytePlus le quota gratuit est PAR MODÈLE et un modèle peut être inaccessible au compte (404) :
+ * ce sont des problèmes de MODÈLE (on passe au modèle suivant), pas de clé.
+ */
+function classifyBytePlus(status: number, code: string, message: string) {
+  const raw = `${code} ${message}`;
+  if (status === 401 || status === 403 || /AuthenticationError|InvalidApiKey/i.test(raw)) return "auth" as const;
+  if (
+    status === 404 ||
+    /InvalidEndpointOrModel|ModelNotOpen|does not exist or you do not have access|not activated/i.test(raw) ||
+    /quota|exhaust|SetLimitExceeded|insufficient|balance|overdue/i.test(raw)
+  ) {
+    return "model" as const;
+  }
+  return classifyError(status, raw);
+}
+
 /** Message clair en français pour les cas les plus fréquents. */
 function friendly(status: number, code: string, message: string): string {
   const raw = `${code} ${message}`;
@@ -73,10 +91,10 @@ function friendly(status: number, code: string, message: string): string {
     return `Clé BytePlus refusée (${status}). Vérifiez la clé dans /admin. ${message}`;
   }
   if (/quota|exhaust|SetLimitExceeded|insufficient|balance|overdue|AccountOverdue/i.test(raw)) {
-    return `Quota BytePlus épuisé ou modèle non activé : ${message}`;
+    return `Quota gratuit épuisé pour ce modèle (${message})`;
   }
-  if (/ModelNotOpen|not activated|not open|activate/i.test(raw)) {
-    return `Modèle BytePlus non activé : activez-le dans la console ModelArk. ${message}`;
+  if (status === 404 || /InvalidEndpointOrModel|ModelNotOpen|not activated|not open|does not exist or you do not have access/i.test(raw)) {
+    return `Modèle inaccessible avec cette clé (${message})`;
   }
   if (status === 429 || /RateLimit|TooManyRequests/i.test(raw)) {
     return `Rate limit atteint (429) chez BytePlus. Réessayez plus tard.`;
@@ -130,7 +148,7 @@ export class BytePlusVideoProvider implements VideoProvider {
         providerJobId: "",
         status: "failed",
         errorMessage: friendly(res.status, code, message),
-        errorKind: classifyError(res.status, `${code} ${message}`),
+        errorKind: classifyBytePlus(res.status, code, message),
         raw: json,
       };
     }

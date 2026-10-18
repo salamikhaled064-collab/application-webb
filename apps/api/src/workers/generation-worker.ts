@@ -3,7 +3,7 @@
  * Uses MockVideoProvider / AgnesVideoProvider from packages/video-provider.
  * Temporary errors are rethrown for BullMQ retry; permanent errors mark failed + refund once.
  */
-import { config, safeLog } from "../config";
+import { config, safeLog, byteplusModels } from "../config";
 import { prisma } from "../lib/prisma";
 import * as creditService from "../services/credit-service";
 import { buildSignedUploadUrl } from "../lib/signed-url";
@@ -211,95 +211,123 @@ export async function processGeneration(data: { generationId: string }) {
         });
       }
 
-      let res: VideoGenerationResult;
-      try {
-        res = await p.createVideo(
-          {
-            model: cand.provider === "byteplus" ? config.byteplus.model : config.agnes.model,
-            prompt: gen.finalPrompt || gen.prompt,
-            imageUrl,
-            imageDataUrl,
-            aspectRatio: gen.format,
-            seconds: gen.durationSeconds,
-            width: gen.width,
-            height: gen.height,
-            numFrames: gen.numFrames,
-            frameRate: gen.frameRate,
-          },
-          cand.key
-        );
-      } catch (e: any) {
-        res = {
-          providerJobId: "",
-          status: "failed",
-          errorKind: "temporary",
-          errorMessage: `Erreur réseau (${cand.label}) : ${e?.message || "inconnue"}`,
-        };
+      // Modèles à essayer avec cette clé (BytePlus : quota gratuit PAR modèle → on passe au suivant)
+      const models =
+        cand.provider === "byteplus"
+          ? byteplusModels(Boolean(gen.upload))
+          : [cand.provider === "agnes" ? config.agnes.model : "mock"];
+      const modelFailures: string[] = [];
+      let keyDecided = false;
+
+      for (const model of models) {
+        let res: VideoGenerationResult;
+        try {
+          res = await p.createVideo(
+            {
+              model,
+              prompt: gen.finalPrompt || gen.prompt,
+              imageUrl,
+              imageDataUrl,
+              aspectRatio: gen.format,
+              seconds: gen.durationSeconds,
+              width: gen.width,
+              height: gen.height,
+              numFrames: gen.numFrames,
+              frameRate: gen.frameRate,
+            },
+            cand.key
+          );
+        } catch (e: any) {
+          res = {
+            providerJobId: "",
+            status: "failed",
+            errorKind: "temporary",
+            errorMessage: `Erreur réseau (${cand.label}) : ${e?.message || "inconnue"}`,
+          };
+        }
+
+        if (res.status !== "failed" && res.providerJobId) {
+          created = res;
+          provider = p;
+          providerName = cand.provider;
+          apiKey = cand.key;
+          apiKeyId = cand.keyId;
+          safeLog("worker", `vidéo lancée avec ${cand.label}, modèle ${model}`, { generationId });
+          if (cand.keyId) {
+            // La clé a fonctionné : on efface une éventuelle pause / erreur précédente
+            await prisma.apiKey
+              .update({ where: { id: cand.keyId }, data: { status: "active", disabledUntil: null, lastError: null } })
+              .catch(() => {});
+          }
+          break;
+        }
+
+        const kind = res.errorKind ?? "fatal";
+        const msg = res.errorMessage || "Création refusée par le fournisseur vidéo";
+        safeLog("worker", `échec avec ${cand.label}, modèle ${model} (${kind})`, { generationId, error: msg });
+
+        if (kind === "model") {
+          // Modèle inaccessible ou quota gratuit du modèle épuisé : modèle suivant, MÊME clé
+          modelFailures.push(`${model} : ${msg}`);
+          continue;
+        }
+
+        keyDecided = true;
+        if (kind === "auth" || kind === "quota") {
+          // Clé inutilisable : désactivée automatiquement (réactivable depuis /admin)
+          if (cand.keyId) {
+            await prisma.apiKey
+              .update({
+                where: { id: cand.keyId },
+                data: { status: "disabled", errorCount: { increment: 1 }, lastError: msg.slice(0, 300) },
+              })
+              .catch(() => {});
+          }
+          skipped.push(`${cand.label} : ${msg}`);
+        } else if (kind === "rate_limit") {
+          if (cand.keyId) {
+            await prisma.apiKey
+              .update({
+                where: { id: cand.keyId },
+                data: {
+                  status: "cooldown",
+                  disabledUntil: new Date(Date.now() + 60 * 1000), // pause courte : 1 minute
+                  errorCount: { increment: 1 },
+                  rateLimitCount: { increment: 1 },
+                  lastError: msg.slice(0, 300),
+                },
+              })
+              .catch(() => {});
+          }
+          lastTemporary = msg;
+        } else if (kind === "temporary") {
+          lastTemporary = msg;
+        } else {
+          // fatal : demande refusée (contenu, paramètres). Changer de clé ne sert à rien chez ce fournisseur.
+          firstFatal ||= msg;
+          skipProviders.add(cand.provider);
+        }
+        break; // décision prise pour cette clé : on sort de la boucle des modèles
       }
 
-      if (res.status !== "failed" && res.providerJobId) {
-        created = res;
-        provider = p;
-        providerName = cand.provider;
-        apiKey = cand.key;
-        apiKeyId = cand.keyId;
-        if (cand.keyId) {
-          // La clé a fonctionné : on efface une éventuelle pause / erreur précédente
-          await prisma.apiKey
-            .update({ where: { id: cand.keyId }, data: { status: "active", disabledUntil: null, lastError: null } })
-            .catch(() => {});
-        }
-        break;
-      }
+      if (created) break;
 
-      const kind = res.errorKind ?? "fatal";
-      const msg = res.errorMessage || "Création refusée par le fournisseur vidéo";
-      safeLog("worker", `échec avec ${cand.label} (${kind}) – clé suivante`, { generationId, error: msg });
-
-      if (kind === "auth" || kind === "quota") {
-        // Clé inutilisable : désactivée automatiquement (réactivable depuis /admin)
+      if (!keyDecided && modelFailures.length) {
+        // Aucun modèle utilisable avec cette clé : on le note (sans désactiver la clé) et on passe à la suivante
+        const summary = `Aucun modèle utilisable avec cette clé. ${modelFailures.join(" | ")}`.slice(0, 300);
         if (cand.keyId) {
           await prisma.apiKey
-            .update({
-              where: { id: cand.keyId },
-              data: { status: "disabled", errorCount: { increment: 1 }, lastError: msg.slice(0, 300) },
-            })
+            .update({ where: { id: cand.keyId }, data: { lastError: summary, errorCount: { increment: 1 } } })
             .catch(() => {});
         }
-        skipped.push(`${cand.label} : ${msg}`);
-        continue;
+        skipped.push(`${cand.label} : aucun modèle utilisable`);
       }
-      if (kind === "rate_limit") {
-        if (cand.keyId) {
-          await prisma.apiKey
-            .update({
-              where: { id: cand.keyId },
-              data: {
-                status: "cooldown",
-                disabledUntil: new Date(Date.now() + 60 * 1000), // pause courte : 1 minute
-                errorCount: { increment: 1 },
-                rateLimitCount: { increment: 1 },
-                lastError: msg.slice(0, 300),
-              },
-            })
-            .catch(() => {});
-        }
-        lastTemporary = msg;
-        continue;
-      }
-      if (kind === "temporary") {
-        lastTemporary = msg;
-        continue;
-      }
-      // fatal : demande refusée (contenu, paramètres). Changer de clé ne sert à rien chez ce fournisseur.
-      firstFatal ||= msg;
-      skipProviders.add(cand.provider);
     }
 
     if (!created) {
       if (lastTemporary) throw new TemporaryError(lastTemporary); // on réessaiera (toute la chaîne)
       if (firstFatal) throw new Error(firstFatal);
-      throw new Error(`Aucune clé utilisable. ${skipped.join(" | ")}`);
+      throw new Error(`Aucune clé ou aucun modèle utilisable pour le moment. ${skipped.join(" | ")}`.trim());
     }
 
     const providerJobId = created.providerJobId;
@@ -525,7 +553,7 @@ export async function startWorkerInProcess() {
             where: { id },
             data: {
               status: "queued",
-              errorMessage: `Les fournisseurs vidéo sont occupés. Nouvel essai ${tries + 1}/${max} dans ${Math.round(wait / 1000)} s…`,
+              errorMessage: `Le serveur est très demandé. Nouvel essai automatique dans ${Math.round(wait / 1000)} s.`,
             },
           })
           .catch(() => {});

@@ -119,8 +119,8 @@ export default function GenerationDetailPage() {
                   {gen.status === "processing" ? "L'IA crée votre vidéo…" : "En file d'attente…"}
                 </p>
                 {gen.errorMessage && <p className="max-w-[260px] text-xs font-medium text-warn">{gen.errorMessage}</p>}
-                <p className="max-w-[260px] text-xs text-muted">
-                  Cela peut prendre quelques minutes, et jusqu&apos;à 30 minutes quand Agnes est saturée. Gardez cette page ouverte : la vidéo apparaîtra ici et dans l&apos;historique.
+                <p className="max-w-[260px] text-sm text-muted">
+                  Votre vidéo est en cours de création. Cela peut prendre quelques minutes. Gardez cette page ouverte : elle se met à jour toute seule.
                 </p>
               </div>
             )}
@@ -148,13 +148,15 @@ export default function GenerationDetailPage() {
         <aside className="space-y-4">
           {gen.provider === "mock" && gen.status === "completed" && (
             <Alert tone="warn">
-              <strong>Mode démonstration.</strong> Cette vidéo est un exemple : votre image, votre description et la durée choisie n&apos;ont pas été utilisées. De vraies vidéos nécessitent une clé Agnes (page Admin).
+              <strong>Mode démonstration.</strong> Cette vidéo est un exemple : votre image, votre description et la durée choisie n&apos;ont pas été utilisées. De vraies vidéos nécessitent une clé API (page Admin).
             </Alert>
           )}
           {gen.status === "failed" && (
             <Alert>
-              {gen.errorMessage || "La génération a échoué."}
-              {gen.creditStatus === "refunded" && " Vos crédits ont été remboursés."}
+              <p className="font-semibold">La vidéo n&apos;a pas pu être créée.</p>
+              {gen.creditStatus === "refunded" && <p className="mt-1">Vos crédits vous ont été rendus.</p>}
+              <p className="mt-2 break-words text-xs opacity-80">Détail : {gen.errorMessage || "erreur inconnue"}</p>
+              <p className="mt-2">Vous pouvez réessayer dans quelques minutes.</p>
             </Alert>
           )}
           {error && <Alert tone="warn">{error}</Alert>}

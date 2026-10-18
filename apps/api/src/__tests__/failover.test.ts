@@ -14,6 +14,7 @@ const h = vi.hoisted(() => {
     keys: [] as any[],
     gen: null as any,
     calls: [] as string[],
+    models: [] as string[],
     behavior: {} as Record<string, string>,
   };
 });
@@ -74,7 +75,8 @@ vi.mock("@ai-video/video-provider", () => {
     constructor(public name: string) {}
     async createVideo(_req: any, key: string) {
       h.calls.push(`${this.name}:${key}`);
-      const kind = h.behavior[key];
+      h.models.push(_req.model);
+      const kind = h.behavior[`${key}|${_req.model}`] ?? h.behavior[key];
       if (kind) return { providerJobId: "", status: "failed", errorKind: kind, errorMessage: `${kind} (${key})` };
       return { providerJobId: `job-${key}`, status: "queued" };
     }
@@ -90,6 +92,7 @@ vi.mock("@ai-video/video-provider", () => {
 });
 
 import { encrypt } from "../lib/crypto";
+import { byteplusModels } from "../config";
 import { processGeneration, TemporaryError, startWorkerInProcess } from "../workers/generation-worker";
 import { setJobHandler, enqueueGeneration } from "../queues/generation-queue";
 
@@ -115,6 +118,7 @@ const key = (name: string) => h.keys.find((k) => k.maskedKey === name);
 beforeEach(() => {
   h.keys = [];
   h.calls = [];
+  h.models = [];
   h.behavior = {};
   h.gen = {
     id: "g1", userId: "u1", status: "pending", mode: "PROMPT_ONLY", upload: null, prompt: "p", finalPrompt: "p",
@@ -214,7 +218,7 @@ describe("bascule automatique des clés", () => {
     h.behavior = { "bp-1": "auth" };
     await processGeneration({ generationId: "g1" });
     expect(h.gen.status).toBe("failed");
-    expect(h.gen.errorMessage).toContain("Aucune clé utilisable");
+    expect(h.gen.errorMessage).toContain("Aucune clé ou aucun modèle utilisable");
   });
 
   it("aucune clé en mode auto : mode démonstration", async () => {
@@ -250,5 +254,49 @@ describe("bascule automatique des clés", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("modèle inaccessible (404) : essaie le modèle suivant avec la MÊME clé, sans la désactiver", async () => {
+    addKey("byteplus", "bp-1");
+    h.behavior = { "bp-1|seedance-1-5-pro-251215": "model" };
+    await processGeneration({ generationId: "g1" });
+    expect(h.models).toEqual(["seedance-1-5-pro-251215", "seedance-1-0-pro-250528"]);
+    expect(key("bp-1").status).toBe("active");
+    expect(h.gen.status).toBe("completed");
+    expect(h.gen.provider).toBe("byteplus");
+  });
+
+  it("quota gratuit épuisé sur 2 modèles : utilise le 3e modèle", async () => {
+    addKey("byteplus", "bp-1");
+    h.behavior = { "bp-1|seedance-1-5-pro-251215": "model", "bp-1|seedance-1-0-pro-250528": "model" };
+    await processGeneration({ generationId: "g1" });
+    expect(h.models.at(-1)).toBe("seedance-1-0-pro-fast-251015");
+    expect(h.gen.status).toBe("completed");
+  });
+
+  it("aucun modèle accessible avec la clé : la clé n'est PAS désactivée, on passe à Agnes", async () => {
+    addKey("byteplus", "bp-1");
+    addKey("agnes", "ag-1");
+    h.behavior = { "bp-1": "model" };
+    await processGeneration({ generationId: "g1" });
+    expect(key("bp-1").status).toBe("active");
+    expect(key("bp-1").lastError).toContain("Aucun modèle utilisable");
+    expect(h.gen.provider).toBe("agnes");
+    expect(h.gen.status).toBe("completed");
+  });
+
+  it("aucun modèle accessible et pas d'autre fournisseur : échec avec un message clair", async () => {
+    addKey("byteplus", "bp-1");
+    h.behavior = { "bp-1": "model" };
+    await processGeneration({ generationId: "g1" });
+    expect(h.gen.status).toBe("failed");
+    expect(h.gen.errorMessage).toContain("Aucune clé ou aucun modèle utilisable");
+    expect(h.models).toHaveLength(4); // les 4 modèles ont été essayés
+  });
+
+  it("liste des modèles : lite texte vs lite image", () => {
+    expect(byteplusModels(false).at(-1)).toBe("seedance-1-0-lite-t2v-250428");
+    expect(byteplusModels(true).at(-1)).toBe("seedance-1-0-lite-i2v-250428");
+    expect(byteplusModels(false)[0]).toBe("seedance-1-5-pro-251215");
   });
 });

@@ -35,15 +35,26 @@ tout se règle dans **/admin → Clés API**.
   - saturation / réseau → clé suivante, puis nouvel essai toutes les 45 s ;
   - demande refusée (contenu, paramètres) → pas de changement de clé, on tente l'autre fournisseur.
 
-### Obtenir une clé BytePlus (2 000 000 de tokens vidéo gratuits par modèle)
+### Modèles BytePlus : essayés automatiquement, dans l'ordre
+Avec une même clé, le site essaie : **Seedance 1.5 pro → 1.0 pro → 1.0 pro fast → 1.0 lite**.
+Le quota gratuit est **par modèle** : si l'un est inaccessible à votre compte (erreur 404) ou à court de quota,
+le suivant est utilisé. La clé n'est pas désactivée pour autant. Pour imposer vos propres modèles :
+variable `BYTEPLUS_MODELS` = `modele1,modele2` (sur le service API).
+
+### Obtenir une clé BytePlus (quota gratuit : le montant exact est affiché dans la console)
 1. Compte : https://www.byteplus.com/en/activity/free
 2. Console ModelArk → **API Key** : https://ai.byteplus.com/ark/region:ap-southeast-1/apiKey
-3. **Activer le modèle** Seedance 1.5 pro (page d'activation des modèles) et activer **Free Tokens Only**
-   pour ne jamais être facturé au-delà du gratuit.
+3. **Ne PAS activer le modèle pour utiliser le gratuit** : d'après la documentation officielle (« Activation Management »),
+   chaque modèle offre des appels gratuits *avant* toute activation. L'activation (page
+   https://console.byteplus.com/ark/region:ark+ap-southeast-1/openManagement) ne sert qu'à passer en
+   **paiement à l'usage** une fois le quota gratuit épuisé. Elle y affiche aussi, par modèle, le quota gratuit
+   restant en temps réel. Pour ne jamais être facturé : ne pas activer, et/ou utiliser le mode **Free Tokens Only**.
 4. `/admin` → Clés API → fournisseur **BytePlus** → coller la clé. Répéter pour chaque clé.
 
-Coût en quota ≈ largeur × hauteur × 24 × secondes ÷ 1024 tokens : 6 s en 720p ≈ 130 000 tokens (≈ 15 vidéos),
-en 480p ≈ 60 000 (≈ 33 vidéos) → `BYTEPLUS_RESOLUTION=480p` pour économiser.
+Coût en quota ≈ largeur × hauteur × 24 × secondes ÷ 1024 tokens : 6 s en 720p ≈ 130 000 tokens,
+en 480p ≈ 60 000 → `BYTEPLUS_RESOLUTION=480p` pour économiser.
+Le quota gratuit annoncé varie selon les sources (2 000 000 de tokens sur la page produit, 500 000 dans l'exemple
+de la doc « Inference free trial ») : **vérifiez le vôtre dans Activation Management** avant de compter le nombre de vidéos.
 Seedance 2.0 / 2.5 exigent un solde de plus de 30 $ : non utilisés ici.
 
 ## Alternative : Agnes Video 2.5 Flash

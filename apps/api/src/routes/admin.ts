@@ -5,7 +5,7 @@ import { prisma } from "../lib/prisma";
 import { encrypt, maskKey } from "../lib/crypto";
 import { ah, HttpError } from "../lib/async-handler";
 import argon2 from "argon2";
-import { config } from "../config";
+import { config, byteplusModels } from "../config";
 
 const router = Router();
 
@@ -54,7 +54,7 @@ router.get(
       chain,
       demoActive,
       models: {
-        byteplus: config.byteplus.model,
+        byteplus: byteplusModels(false).join(", "),
         agnes: config.agnes.model,
       },
       activeKeysByProvider: keysByProvider,
