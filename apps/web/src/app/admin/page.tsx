@@ -32,6 +32,7 @@ export default function AdminPage() {
   const [grant, setGrant] = useState<Record<string, string>>({});
   const [adm, setAdm] = useState({ email: "", name: "", password: "" });
   const [meId, setMeId] = useState("");
+  const [probe, setProbe] = useState<{ keyId: string; loading: boolean; error?: string; baseUrl?: string; results?: { model: string; verdict: string; status: number; message: string }[] } | null>(null);
 
   const loadAll = useCallback(async () => {
     try {
@@ -59,6 +60,16 @@ export default function AdminPage() {
   }, [router]);
 
   useEffect(() => { loadAll(); }, [loadAll]);
+
+  async function testKey(keyId: string) {
+    setProbe({ keyId, loading: true });
+    try {
+      const d = await apiFetch<{ baseUrl: string; results: any[] }>(`/api/admin/api-keys/${keyId}/test`, { method: "POST" });
+      setProbe({ keyId, loading: false, baseUrl: d.baseUrl, results: d.results });
+    } catch (e) {
+      setProbe({ keyId, loading: false, error: getNetworkErrorMessage(e) });
+    }
+  }
 
   async function run(action: () => Promise<unknown>, success: string) {
     setNotice(null);
@@ -205,6 +216,51 @@ export default function AdminPage() {
             </p>
           </div>
 
+          {probe && (
+            <div className="card p-5">
+              <div className="flex items-center justify-between">
+                <h2 className="text-lg font-bold">Test de la clé BytePlus</h2>
+                <button className="text-sm text-muted hover:text-ink" onClick={() => setProbe(null)}>Fermer</button>
+              </div>
+              {probe.loading && <p className="mt-3 text-sm text-muted">Test en cours… (aucun quota n&apos;est consommé)</p>}
+              {probe.error && <div className="mt-3"><Alert>{probe.error}</Alert></div>}
+              {probe.results && (
+                <>
+                  <p className="hint">Requêtes volontairement vides vers {probe.baseUrl} : aucune vidéo n&apos;est créée, aucun quota consommé.</p>
+                  <ul className="mt-3 divide-y divide-line text-sm">
+                    {probe.results.map((r) => {
+                      const v: Record<string, { label: string; cls: string }> = {
+                        recognized: { label: "Reconnu : accès probable", cls: "text-ok" },
+                        no_access: { label: "Inaccessible avec cette clé", cls: "text-bad" },
+                        key_refused: { label: "Clé refusée", cls: "text-bad" },
+                        rate_limited: { label: "Limite de requêtes", cls: "text-warn" },
+                        error: { label: "Erreur", cls: "text-warn" },
+                        unexpected: { label: "Réponse inattendue", cls: "text-warn" },
+                      };
+                      const x = v[r.verdict] || v.error;
+                      return (
+                        <li key={r.model} className="py-2.5">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <code className="rounded bg-sunken px-1.5 py-0.5 text-xs">{r.model}</code>
+                            <strong className={x.cls}>{x.label}</strong>
+                          </div>
+                          {r.verdict !== "recognized" && <p className="mt-1 break-words text-xs text-muted">HTTP {r.status} : {r.message}</p>}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                  {probe.results.every((r) => r.verdict === "no_access") && (
+                    <div className="mt-4">
+                      <Alert tone="warn">
+                        Aucun modèle n&apos;est accessible avec cette clé. Vérifiez dans la console BytePlus (ModelArk) que la clé vient bien du même compte, puis la page « Activation Management » : l&apos;état du modèle Seedance et son quota gratuit.
+                      </Alert>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
           <div className="card overflow-x-auto">
             <table className="w-full text-left text-sm">
               <thead className="border-b border-line text-muted">
@@ -227,6 +283,9 @@ export default function AdminPage() {
                     <td className="max-w-xs p-3.5 text-xs text-bad">{k.lastError || ""}</td>
                     <td className="p-3.5 text-xs">{fmt(k.disabledUntil)}</td>
                     <td className="space-x-3 whitespace-nowrap p-3.5 text-right">
+                      {k.provider === "byteplus" && (
+                        <button className="text-sm font-semibold text-brand hover:underline" onClick={() => testKey(k.id)}>Tester</button>
+                      )}
                       {k.status === "active" ? (
                         <button className="text-sm font-semibold text-warn hover:underline" onClick={() => run(() => apiFetch(`/api/admin/api-keys/${k.id}`, { method: "PATCH", body: JSON.stringify({ status: "disabled" }) }), "Clé désactivée.")}>Désactiver</button>
                       ) : (

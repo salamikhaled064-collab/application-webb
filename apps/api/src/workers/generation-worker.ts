@@ -314,13 +314,13 @@ export async function processGeneration(data: { generationId: string }) {
 
       if (!keyDecided && modelFailures.length) {
         // Aucun modèle utilisable avec cette clé : on le note (sans désactiver la clé) et on passe à la suivante
-        const summary = `Aucun modèle utilisable avec cette clé. ${modelFailures.join(" | ")}`.slice(0, 300);
+        const summary = `Aucun modèle utilisable avec cette clé. ${modelFailures.join(" | ")}`.slice(0, 1200);
         if (cand.keyId) {
           await prisma.apiKey
             .update({ where: { id: cand.keyId }, data: { lastError: summary, errorCount: { increment: 1 } } })
             .catch(() => {});
         }
-        skipped.push(`${cand.label} : aucun modèle utilisable`);
+        skipped.push(`${cand.label} : aucun modèle utilisable → ${modelFailures.join(" ; ")}`);
       }
     }
 

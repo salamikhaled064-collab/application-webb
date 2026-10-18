@@ -2,7 +2,8 @@ import { Router } from "express";
 import { z } from "zod";
 import { requireAuth, requireAdmin } from "../middleware/auth";
 import { prisma } from "../lib/prisma";
-import { encrypt, maskKey } from "../lib/crypto";
+import { encrypt, decrypt, maskKey } from "../lib/crypto";
+import { probeBytePlusModels } from "../lib/byteplus-probe";
 import { ah, HttpError } from "../lib/async-handler";
 import argon2 from "argon2";
 import { config, byteplusModels } from "../config";
@@ -214,6 +215,25 @@ router.post(
     });
     await audit(req.user!.id, "api_key.create", "ApiKey", row.id);
     res.status(201).json({ id: row.id, maskedKey: row.maskedKey, status: row.status });
+  })
+);
+
+// Diagnostic d'une clé BytePlus : quels modèles sont accessibles ? (ne consomme aucun quota)
+router.post(
+  "/api-keys/:id/test",
+  ah(async (req, res) => {
+    const row = await prisma.apiKey.findUnique({ where: { id: req.params.id } });
+    if (!row) throw new HttpError(404, "Clé introuvable");
+    if (row.provider !== "byteplus") throw new HttpError(400, "Le test n'est disponible que pour les clés BytePlus.");
+    let key: string;
+    try {
+      key = decrypt(row.encryptedKey);
+    } catch {
+      throw new HttpError(400, "Clé illisible (ENCRYPTION_KEY a changé ?). Ressaisissez-la.");
+    }
+    const models = [...new Set([...byteplusModels(false), ...byteplusModels(true)])];
+    const results = await probeBytePlusModels(key, config.byteplus.baseUrl, models);
+    res.json({ baseUrl: config.byteplus.baseUrl, results });
   })
 );
 
